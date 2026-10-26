@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SCRUBBED, REQUEST_HEADER_ALLOWLIST, isSecretKey, scrub, scrubParams, scrubQuery, scrubValue, sortKeys } from './scrub';
+import { SCRUBBED, REQUEST_HEADER_ALLOWLIST, isSecretKey, scrub, scrubParams, scrubPath, scrubQuery, scrubValue, sortKeys } from './scrub';
 
 /** One recorded exchange. Stored as one JSON file per request, named `<entryKey>.json`. */
 export interface RecordedEntry {
@@ -34,7 +34,7 @@ export function hashBody(body: string): string {
 /** Stable key: sha256 of method, path, scrubbed sorted query and canonical body hash (first 24 hex chars). */
 export function entryKey(r: Pick<RecordedEntry['request'], 'method' | 'path' | 'query' | 'bodyHash'>): string {
   return createHash('sha256')
-    .update([r.method.toUpperCase(), r.path, scrubQuery(r.query), r.bodyHash ?? ''].join('\n'))
+    .update([r.method.toUpperCase(), scrubPath(r.path), scrubQuery(r.query), r.bodyHash ?? ''].join('\n'))
     .digest('hex')
     .slice(0, 24);
 }
@@ -42,12 +42,20 @@ export function entryKey(r: Pick<RecordedEntry['request'], 'method' | 'path' | '
 function canonicalText(s: string, contentType: string): string | undefined {
   if (s === '') return undefined;
   if (contentType.toLowerCase().includes('application/x-www-form-urlencoded')) return `form:${scrubParams(s, true)}`;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(s);
-    return `json:${JSON.stringify(sortKeys(scrubValue(parsed)))}`;
+    parsed = JSON.parse(s);
   } catch {
-    return `text:${s}`;
+    parsed = undefined;
   }
+  // Only JSON objects/arrays can be scrubbed field by field. Any other text (or a bare JSON scalar) may itself be a
+  // secret, and hashing it would make the match key depend on it, so it is refused rather than recorded.
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error(
+      `contract replay: refusing a text request body with content type "${contentType === '' ? '(none)' : contentType}": only form-urlencoded and JSON object/array bodies are supported`,
+    );
+  }
+  return `json:${JSON.stringify(sortKeys(scrubValue(parsed)))}`;
 }
 
 function canonicalFormData(fd: FormData): string {
@@ -103,7 +111,7 @@ async function describeRequest(
     if (!REQUEST_HEADER_ALLOWLIST.has(k)) return;
     headers[k] = k === 'content-type' && v.toLowerCase().startsWith('multipart/') ? 'multipart/form-data' : v;
   });
-  const request: RecordedEntry['request'] = { method, path: u.pathname, query: scrubQuery(u.search), headers };
+  const request: RecordedEntry['request'] = { method, path: scrubPath(u.pathname), query: scrubQuery(u.search), headers };
   if (canon !== undefined) request.bodyHash = hashBody(canon);
   return { url, method, request };
 }

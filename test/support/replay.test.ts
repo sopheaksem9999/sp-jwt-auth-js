@@ -246,3 +246,96 @@ describe('liveOrReplay', () => {
     expect(await (await back.fetch('http://be.test/api/items')).json()).toEqual({ data: { access_token: SCRUBBED, id: 1 } });
   });
 });
+
+describe('scrub hardening (Task 18)', () => {
+  const root = (): string => join(dir, 'fixtures');
+  const respond = (body: unknown, headers: Record<string, string> = {}): typeof fetch => async () =>
+    new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json', ...headers } });
+  const record = (f: typeof fetch) =>
+    liveOrReplay({ env: { SP_CONTRACT_URL: 'http://x.test', SP_CONTRACT_RECORD: '1', SP_CONTRACT_BACKEND_VERSION: 'v1' }, fixturesRoot: root(), liveFetch: f });
+  const replay = () => liveOrReplay({ env: { SP_CONTRACT_BACKEND_VERSION: 'v1' }, fixturesRoot: root() });
+
+  it('normalises key names (case, - and _) before matching secret keys, on disk and in matching', async () => {
+    const secrets = { accessToken: 'AT-1', 'access-token': 'AT-2', idToken: 'IT-1', 'Client-Secret': 'CS-1', refreshToken: 'RT-1', API_KEY: 'AK-1', twoFa: 'keep' };
+    await record(respond({ data: secrets })).fetch('http://x.test/api/n?accessToken=Q-1&client-secret=Q-2', { method: 'POST', body: JSON.stringify(secrets) });
+    const disk = allFiles(root());
+    for (const lit of ['AT-1', 'AT-2', 'IT-1', 'CS-1', 'RT-1', 'AK-1', 'Q-1', 'Q-2']) expect(disk).not.toContain(lit);
+    expect(disk).toContain('keep');
+    const other = Object.fromEntries(Object.keys(secrets).map((k) => [k, k === 'twoFa' ? 'keep' : 'DIFFERENT']));
+    expect((await replay().fetch('http://x.test/api/n?client-secret=z&accessToken=y', { method: 'POST', body: JSON.stringify(other) })).status).toBe(200);
+  });
+
+  it('scrubs the new response headers x-auth-token, x-api-key, x-refresh-token (any case)', async () => {
+    await record(respond({ ok: 1 }, { 'X-Auth-Token': 'HDR-1', 'x-api-key': 'HDR-2', 'X-Refresh-Token': 'HDR-3', 'x-keep': 'visible' })).fetch('http://x.test/api/h');
+    const disk = allFiles(root());
+    for (const lit of ['HDR-1', 'HDR-2', 'HDR-3']) expect(disk).not.toContain(lit);
+    expect(disk).toContain('visible');
+  });
+
+  it('scrubs the Location fragment as well as the query', () => {
+    const e = entry({}, { headers: { Location: 'https://app.test/cb?code=C-1&n=1#access_token=F-1&state=S-1&refresh_token=F-2&keep=ok' } });
+    const loc = scrub(e).response.headers.Location as string;
+    for (const lit of ['C-1', 'F-1', 'S-1', 'F-2']) expect(loc).not.toContain(lit);
+    expect(loc).toContain('keep=ok');
+    expect(scrub(entry({}, { headers: { Location: 'https://app.test/cb#access_token=F-3' } })).response.headers.Location).not.toContain('F-3');
+    expect(scrub(entry({}, { headers: { Location: 'https://app.test/app#/inbox' } })).response.headers.Location).toBe('https://app.test/app#/inbox');
+  });
+
+  it('scrubs the token/hash segment of /password/reset/<token> and /email/verify/<id>/<hash> (rule: path, Location; id kept)', async () => {
+    const f = respond({ ok: 1 }, { Location: 'https://app.test/password/reset/LOC-TOK?email=a%40b.c' });
+    await record(f).fetch('http://x.test/api/v2/password/reset/RESET-TOK?email=a%40b.c');
+    await record(f).fetch('http://x.test/email/verify/12/VERIFY-HASH?signature=sig');
+    const disk = allFiles(root());
+    for (const lit of ['RESET-TOK', 'VERIFY-HASH', 'LOC-TOK']) expect(disk).not.toContain(lit);
+    expect(disk).toContain('/email/verify/12/[scrubbed]');
+    expect(disk).toContain('/api/v2/password/reset/[scrubbed]');
+    expect((await replay().fetch('http://other.test/api/v2/password/reset/ANOTHER?email=a%40b.c')).status).toBe(200);
+    expect((await replay().fetch('http://other.test/email/verify/12/OTHERHASH?signature=sig')).status).toBe(200);
+    await expect(replay().fetch('http://other.test/email/verify/13/OTHERHASH?signature=sig')).rejects.toThrow(/unrecorded/);
+  });
+
+  it('refuses text bodies that are neither form nor JSON objects, naming the content type, before calling the backend', async () => {
+    let called = false;
+    const spy: typeof fetch = async (...a) => {
+      called = true;
+      return respond({})(...a);
+    };
+    const r = record(spy);
+    await expect(r.fetch('http://x.test/api/t', { method: 'POST', body: 'password=hunter2 raw', headers: { 'content-type': 'text/plain' } })).rejects.toThrow(/text\/plain/);
+    await expect(r.fetch('http://x.test/api/t', { method: 'POST', body: 'tok-123' })).rejects.toThrow(/refus/i);
+    await expect(r.fetch('http://x.test/api/t', { method: 'POST', body: '"just-a-secret-string"', headers: { 'content-type': 'application/json' } })).rejects.toThrow(/refus/i);
+    await expect(replay().fetch('http://x.test/api/t', { method: 'POST', body: 'x', headers: { 'content-type': 'text/csv' } })).rejects.toThrow(/text\/csv/);
+    expect(called).toBe(false);
+  });
+
+  it('scrubs code, state, token, otp only on the request side; business fields in responses survive', async () => {
+    const body = { code: 'E1', state: 'open', otp: 'visible-otp', nested: { code: 'E2' } };
+    await record(respond(body)).fetch('http://x.test/api/r?code=RQ-1&state=RQ-2&token=RQ-3&otp=RQ-4', {
+      method: 'POST',
+      body: JSON.stringify({ code: 'RB-1', state: 'RB-2', token: 'RB-3', otp: 'RB-4', keep: 1 }),
+    });
+    const disk = allFiles(root());
+    for (const lit of ['RQ-1', 'RQ-2', 'RQ-3', 'RQ-4', 'RB-1', 'RB-2', 'RB-3', 'RB-4']) expect(disk).not.toContain(lit);
+    expect(JSON.parse(disk).response.body).toEqual(body);
+    // request side is value-independent for matching
+    const again = await replay().fetch('http://x.test/api/r?otp=a&token=b&state=c&code=d', {
+      method: 'POST',
+      body: JSON.stringify({ keep: 1, otp: 'x', token: 'y', state: 'z', code: 'w' }),
+    });
+    expect(await again.json()).toEqual(body);
+  });
+
+  it('keeps the literal response body {"code":"E1","state":"open"} intact through scrub', () => {
+    expect(scrub(entry({}, { body: { code: 'E1', state: 'open' } })).response.body).toEqual({ code: 'E1', state: 'open' });
+    expect(JSON.parse(scrub(entry({}, { body: '{"code":"E1","state":"open"}' })).response.body as string)).toEqual({ code: 'E1', state: 'open' });
+  });
+
+  it('still scrubs both-sides secrets in responses, and a string `token` field; recurses into an object `token`', () => {
+    const out = scrub(
+      entry({}, { body: { token: { access_token: 'a', refresh_token: 'r', expires_in: 60 }, secret: 's', api_key: 'k', '2fa_token': 't', password: 'p', id_token: 'i', client_secret: 'c' } }),
+    ).response.body as Record<string, unknown>;
+    expect(out.token).toEqual({ access_token: SCRUBBED, refresh_token: SCRUBBED, expires_in: 60 });
+    for (const k of ['secret', 'api_key', '2fa_token', 'password', 'id_token', 'client_secret']) expect(out[k]).toBe(SCRUBBED);
+    expect((scrub(entry({}, { body: { token: 'opaque-string' } })).response.body as { token: string }).token).toBe(SCRUBBED);
+  });
+});

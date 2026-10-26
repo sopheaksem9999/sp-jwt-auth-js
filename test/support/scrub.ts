@@ -5,25 +5,32 @@ import type { RecordedEntry } from './replay';
 /** Replaces every secret value (rule applied uniformly: JSON keys, form params, query strings, headers). */
 export const SCRUBBED = '[scrubbed]';
 
-/** Key names (case-insensitive) whose values are secret, in JSON bodies, form params and query strings. */
+/** Normal form used to match key names: lower case with `-` and `_` removed (`accessToken`, `access-token`, `ACCESS_TOKEN` all become `accesstoken`). */
+export const normaliseKey = (k: string): string => k.toLowerCase().replace(/[-_]/g, '');
+
+/** Secret key names (normalised, see `normaliseKey`) scrubbed on BOTH the request and the response side. */
 export const SECRET_KEYS: ReadonlySet<string> = new Set([
   'password',
-  'password_confirmation',
-  '2fa_token',
-  'otp',
-  'code',
-  'token',
-  'id_token',
-  'api_key',
+  'passwordconfirmation',
+  '2fatoken',
+  'idtoken',
   'apikey',
   'csrf',
-  '_token',
-  'state',
-  'client_secret',
+  'csrftoken',
+  'xsrftoken',
+  'clientsecret',
   'secret',
-  'access_token',
-  'refresh_token',
+  'accesstoken',
+  'refreshtoken',
 ]);
+
+/**
+ * Normalised key names scrubbed ONLY on the request side (query, form, JSON and FormData request fields, and
+ * `Location` URLs). Response bodies keep them, so error/business fields such as `code` and `state` stay faithful.
+ */
+export const REQUEST_ONLY_SECRET_KEYS: ReadonlySet<string> = new Set(['code', 'state', 'token', 'otp']);
+
+export type Side = 'request' | 'response';
 
 /** Header names (lower case) whose values are secret. */
 export const SECRET_HEADERS: ReadonlySet<string> = new Set([
@@ -34,22 +41,42 @@ export const SECRET_HEADERS: ReadonlySet<string> = new Set([
   'x-sp-csrf',
   'x-csrf-token',
   'x-xsrf-token',
+  'x-auth-token',
+  'x-api-key',
+  'x-refresh-token',
 ]);
 
 /** The only request headers ever written to a fixture. */
 export const REQUEST_HEADER_ALLOWLIST: ReadonlySet<string> = new Set(['accept', 'content-type']);
 
-export const isSecretKey = (k: string): boolean => SECRET_KEYS.has(k.toLowerCase());
+export function isSecretKey(k: string, side: Side = 'request'): boolean {
+  const n = normaliseKey(k);
+  return SECRET_KEYS.has(n) || (side === 'request' && REQUEST_ONLY_SECRET_KEYS.has(n));
+}
+
+/**
+ * Scrubs the token/hash segment of the known sensitive route shapes `/password/reset/<token>` and
+ * `/email/verify/<id>/<hash>` (the id stays); applies to request paths and to `Location` paths. Idempotent.
+ */
+export function scrubPath(path: string): string {
+  return path
+    .replace(/(^|\/)(password\/reset)\/[^/?#]+/g, `$1$2/${SCRUBBED}`)
+    .replace(/(^|\/)(email\/verify\/[^/?#]+)\/[^/?#]+/g, `$1$2/${SCRUBBED}`);
+}
 
 /** Code-unit comparison (locale independent). */
 export const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Recursively replaces secret values; the result is a copy. */
-export function scrubValue(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(scrubValue);
+export function scrubValue(v: unknown, side: Side = 'request'): unknown {
+  if (Array.isArray(v)) return v.map((x) => scrubValue(x, side));
   if (typeof v === 'object' && v !== null) {
     const out: Record<string, unknown> = {};
-    for (const [k, x] of Object.entries(v)) out[k] = isSecretKey(k) ? SCRUBBED : scrubValue(x);
+    for (const [k, x] of Object.entries(v)) {
+      // A response `token` field holding a string is an opaque credential; an object `token` (`{ token: { access_token } }`) is recursed into.
+      const secretString = side === 'response' && normaliseKey(k) === 'token' && typeof x === 'string';
+      out[k] = isSecretKey(k, side) || secretString ? SCRUBBED : scrubValue(x, side);
+    }
     return out;
   }
   return v;
@@ -78,25 +105,28 @@ export function scrubParams(search: string, sort: boolean): string {
 export const scrubQuery = (search: string): string => scrubParams(search, true);
 
 function scrubLocation(value: string): string {
-  const i = value.indexOf('?');
-  if (i < 0) return value;
-  const hash = value.indexOf('#', i);
-  const end = hash < 0 ? value.length : hash;
-  const qs = scrubParams(value.slice(i + 1, end), false);
-  return `${value.slice(0, i)}${qs === '' ? '' : `?${qs}`}${value.slice(end)}`;
+  const h = value.indexOf('#');
+  const fragment = h < 0 ? '' : value.slice(h + 1);
+  const beforeHash = h < 0 ? value : value.slice(0, h);
+  const q = beforeHash.indexOf('?');
+  const path = scrubPath(q < 0 ? beforeHash : beforeHash.slice(0, q));
+  const qs = q < 0 ? '' : scrubParams(beforeHash.slice(q + 1), false);
+  // A fragment is only parsed as params when it looks like `a=b`; a route fragment such as `#/inbox` is kept.
+  const frag = h < 0 ? '' : `#${fragment.includes('=') ? scrubParams(fragment, false) : fragment}`;
+  return `${path}${q < 0 ? '' : qs === '' ? '' : `?${qs}`}${frag}`;
 }
 
 function scrubBody(body: unknown): unknown {
   if (typeof body === 'string') {
     try {
       const parsed: unknown = JSON.parse(body);
-      if (typeof parsed === 'object' && parsed !== null) return JSON.stringify(scrubValue(parsed));
+      if (typeof parsed === 'object' && parsed !== null) return JSON.stringify(scrubValue(parsed, 'response'));
     } catch {
       /* not JSON: leave as is */
     }
     return body;
   }
-  return scrubValue(body);
+  return scrubValue(body, 'response');
 }
 
 function scrubResponseHeaders(h: Record<string, string>): Record<string, string> {
@@ -110,11 +140,12 @@ function scrubResponseHeaders(h: Record<string, string>): Record<string, string>
 
 /**
  * Returns a scrubbed copy of `entry`. Request bodies are never kept; request headers are reduced to the
- * allowlist; query secrets, response JSON secrets, secret headers and `Location` query secrets are replaced.
+ * allowlist; query secrets, response JSON secrets, secret headers and `Location` query/fragment secrets are replaced,
+ * and so are the token/hash segments of the known sensitive paths (`scrubPath`).
  */
 export function scrub(entry: RecordedEntry): RecordedEntry {
   const r = entry.request;
-  const request: RecordedEntry['request'] = { method: r.method, path: r.path, query: scrubQuery(r.query) };
+  const request: RecordedEntry['request'] = { method: r.method, path: scrubPath(r.path), query: scrubQuery(r.query) };
   if (r.bodyHash !== undefined) request.bodyHash = r.bodyHash;
   if (r.headers !== undefined) {
     const h: Record<string, string> = {};
