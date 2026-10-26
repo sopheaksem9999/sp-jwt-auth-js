@@ -354,6 +354,10 @@ describe('README stays in sync with this file', () => {
     const documented = [...section.matchAll(/^\| `([a-z_0-9]+)` \|/gm)].map((m) => m[1]!);
     expect(declared.length).toBeGreaterThan(5);
     expect(documented).toEqual(declared);
+    // Raised by oauth (callback state / malformed callback), sessions and social (bad path values).
+    expect(declared).toEqual(expect.arrayContaining(['invalid_state', 'invalid_request']));
+    // A second factor is a LoginResult status, never a raised error.
+    expect(declared).not.toContain('second_factor_required');
   });
 
   it('presets documented in the README exist', () => {

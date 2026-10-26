@@ -1,7 +1,10 @@
-/** Machine-readable category of a failed auth call; `(string & {})` carries RFC 6749 codes such as `invalid_client`. */
+/**
+ * Machine-readable category of a failed auth call; `(string & {})` carries RFC 6749
+ * codes such as `invalid_client`. A required second factor is not an error: it is
+ * the `LoginResult` status `second_factor_required`.
+ */
 export type SpAuthErrorCode =
   | 'session_ended'
-  | 'second_factor_required'
   | 'invalid_code'
   | 'rate_limited'
   | 'delivery_failed'
@@ -9,6 +12,8 @@ export type SpAuthErrorCode =
   | 'module_disabled'
   | 'csrf_failed'
   | 'invalid_token'
+  | 'invalid_state'
+  | 'invalid_request'
   | 'network'
   | 'timeout'
   | 'unknown'

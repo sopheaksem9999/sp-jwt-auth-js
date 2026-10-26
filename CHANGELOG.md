@@ -1,5 +1,1 @@
-# Changelog
-
-## Unreleased
-
-- Repository scaffold and build guards.
+# @sopheak/sp-jwt-auth
