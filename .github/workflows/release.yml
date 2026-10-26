@@ -7,6 +7,9 @@ permissions:
   contents: read
   id-token: write # npm provenance
 
+# Publishing requires `pnpm changeset version` to have been run and COMMITTED on the tagged commit:
+# that bumps package.json `version` and writes CHANGELOG.md. Tag that commit `v<version>`; the guard
+# below refuses to publish when the tag and package.json disagree (e.g. a tag pushed before the bump).
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -18,8 +21,16 @@ jobs:
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      - name: Tag matches package.json version
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      # Build first so the dist-based tests run instead of skipping.
+      - run: pnpm build
       - run: pnpm vitest run
+        env:
+          REQUIRE_DIST: '1'
       - run: pnpm check
       - run: npm publish --provenance --access public
         env:

@@ -8,15 +8,15 @@ permissions:
   contents: read
 
 jobs:
-  # Spec §7 runtime matrix: Node 20 / 22 / 24, each with the full suite (node + edge vitest projects), the edge
-  # canary, and `pnpm check` (build, publint, attw, check-dist, check-modules, check-bundle, CJS + ESM smoke imports).
+  # Spec §7 runtime matrix. Node 22 / 24: the full suite (node + edge vitest projects), the edge canary and
+  # `pnpm check` (build, publint, attw, check-dist, check-modules, check-bundle, CJS + ESM smoke imports).
   node:
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22, 24]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -34,6 +34,31 @@ jobs:
           REQUIRE_DIST: '1'
       - run: pnpm test:edge-canary
       - run: pnpm check
+
+  # Node 20 (still a supported runtime, `engines.node >=20`): no test suite here, because Vitest 5 needs
+  # Node >= 22.12, and pnpm 12 itself needs Node >= 22.13. So `pnpm check` (build, publint, attw and the guards)
+  # runs on Node 24, then the built package is checked on Node 20 with plain `node`: the dist and bundle guards
+  # and the CJS + ESM smoke imports of every entry.
+  node20:
+    name: Node 20 (build + guards + smoke imports)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --version
+      - run: node scripts/check-dist.mjs
+      - run: node scripts/check-modules.mjs
+      - run: node scripts/check-bundle.mjs
+      - run: node scripts/smoke-imports.mjs
 
   # Deno and Bun: the unit suite (vitest `node` project, its workers running on that runtime), then the built ESM
   # entries imported by file URL with a small end-to-end flow on a fake fetch.
