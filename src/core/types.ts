@@ -67,7 +67,7 @@ export type LoginResult = { status: 'authenticated' } | { status: 'second_factor
 
 /**
  * Event passed to `onEvent`. Core emits `login`, `logout` (`everywhere`,
- * optional `remoteError`), `refresh` (`adopted: true` when another tab's
+ * optional `remoteError: { status, code }` of a failed server-side revoke), `refresh` (`adopted: true` when another tab's
  * rotation was used instead of a request), `refresh_failed` (`status`, `code`),
  * `reuse_suspected` (`status`: a refresh 401 after another tab rotated; the
  * session continues) and `session_ended`; later tasks add their own types. Payloads never carry token
@@ -231,7 +231,8 @@ export interface JwtAuth {
   /**
    * Clears local state and storage first (keeping `deviceId`), then revokes
    * server-side (best effort) with the token captured before clearing. Never
-   * rejects; a failure other than 401 is reported as `remoteError` on the `logout` event.
+   * rejects; a failure other than 401 is reported as `remoteError` (`{ status, code }`
+   * only) on the `logout` event.
    */
   logout(o?: { everywhere?: boolean }): Promise<void>;
   /**
@@ -317,7 +318,9 @@ export interface JwtAuth {
    * follows the new token and `lastCompanyId` is persisted. Runs under the
    * refresh lock, so it never races a refresh for the same refresh token. A
    * response without a valid pair throws `SpAuthError('unknown')` and keeps the
-   * existing tokens. Throws `not_configured` when `endpoints.switchCompany` is unset.
+   * existing tokens. A logout (here or in another tab) while the request is in flight
+   * wins: the response is dropped and the call rejects `SpAuthError('session_ended')`.
+   * Throws `not_configured` when `endpoints.switchCompany` is unset.
    */
   switchCompany(companyId: string | number): Promise<void>;
   /** `true` when the access token's `scopes` claim holds `scope` or `*`. UI hint only: the server still decides. `false` when anonymous. */

@@ -4,9 +4,10 @@ import type { BroadcastToken, LockGrant, TabMessage } from './crosstab';
 import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import { PACKAGE_REVOKE_PATH, bearerFrom } from './http';
 import { createRefresher, isSessionEnded, sessionEndedError, waitFor } from './refresh';
+import { memoryStore } from './stores';
 import type { TokenStore, Tokens } from './stores';
 import type { AuthMode, ModeContext, ModeRuntime } from './types';
-import { findTokenPair, unwrap } from './unwrap';
+import { findTokenPair, unwrapOrThrow } from './unwrap';
 import type { TokenPairRaw } from './unwrap';
 // Type-only: erased at build time, so there is no runtime import cycle with user-session.
 import type { UserSessionOptions } from './user-session';
@@ -45,10 +46,49 @@ export function hasDocument(): boolean {
 /** Default `broadcastGraceMs`. */
 const DEFAULT_BROADCAST_GRACE_MS = 100;
 
-/** `broadcastGraceMs` as used: the default when unset or not a finite number, `0` (off) when negative. */
+/** Largest `setTimeout` delay; runtimes fire a larger one almost at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * `broadcastGraceMs` as used: the default when unset or not a finite number, `0`
+ * (off) when negative, at most `MAX_TIMER_MS`.
+ */
 function graceOf(v: number | undefined): number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_BROADCAST_GRACE_MS;
-  return Math.max(0, v);
+  return Math.min(MAX_TIMER_MS, Math.max(0, v));
+}
+
+/** `true` when tabs can coordinate at all: Web Locks (`navigator.locks`) or `BroadcastChannel`. */
+function hasTabCoordination(): boolean {
+  try {
+    const g = globalThis as { BroadcastChannel?: unknown; navigator?: { locks?: { request?: unknown } } };
+    return typeof g.BroadcastChannel === 'function' || typeof g.navigator?.locks?.request === 'function';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default cross-tab key for the cookie transport in a browser tab, derived from
+ * the cookie's scope: `cookie:<origin of baseUrl>`; for a relative `baseUrl`,
+ * the origin it resolves to against `location.origin`, else `cookie:default`.
+ * `undefined` (store-scoped coordinator) without a `document`, or without Web
+ * Locks and `BroadcastChannel`: servers never get a process-wide lock or channel.
+ */
+function cookieScopeKey(baseUrl: string): string | undefined {
+  if (!hasDocument() || !hasTabCoordination()) return undefined;
+  try {
+    return `cookie:${new URL(baseUrl).origin}`;
+  } catch {
+    /* relative baseUrl */
+  }
+  try {
+    const origin = (globalThis as { location?: { origin?: unknown } }).location?.origin;
+    if (typeof origin === 'string' && origin !== '' && origin !== 'null') return `cookie:${new URL(baseUrl, origin).origin}`;
+  } catch {
+    /* no usable location */
+  }
+  return 'cookie:default';
 }
 
 /** `true` when tabs can talk: `BroadcastChannel`, or (for a web-storage key) the `storage` event. */
@@ -142,20 +182,27 @@ function hasSecrets(t: Tokens | null): boolean {
  *   401 while signed in: CSRF cleared (`deviceId` kept), `anonymous`,
  *   `session_ended`; unless another tab broadcast a newer token meanwhile, which
  *   is adopted with `reuse_suspected`. 403: `SpAuthError('csrf_failed')`, the
- *   session and state are kept. Network, timeout, 5xx: kept, rethrown.
+ *   session and state are kept. Network, timeout, 5xx: kept, rethrown. A 2xx
+ *   that a newer token overtook (a login, or another tab's) is dropped, and one
+ *   whose store write a logout interrupted is undone (`session_ended`).
  * - **Logout.** Local state first (CSRF cleared, `deviceId` kept), then
  *   `endpoints.logout` or `/auth/token/revoke` with the bearer (when one was
  *   held) AND the cookie plus `X-SP-CSRF`; a 401 means already logged out.
- * - **Tabs, and servers.** Tokens and CSRF values are broadcast, and broadcast
- *   ones consumed, only in a real tab context: a `document`, a working
- *   `BroadcastChannel`/`storage`-event path, a cross-tab key that is explicit
- *   or comes from a `webStorageStore` (or an injected instance), and a store
- *   write that actually persisted. On a server (no `document`) the cookie is
+ * - **Tabs, and servers.** In a browser tab (a `document`, and Web Locks or
+ *   `BroadcastChannel`) cross-tab coordination is ON by default for ANY store,
+ *   keyed by the cookie's scope (`cookie:<origin of baseUrl>`), since every tab
+ *   refreshes through the same httpOnly cookie; `crossTab: false` turns it off.
+ *   Tokens and CSRF values are broadcast, and broadcast ones consumed, only in a
+ *   real tab context: a `document`, a working `BroadcastChannel`/`storage`-event
+ *   path, a cross-tab key (explicit, the cookie-scope default, or a
+ *   `webStorageStore` key, or an injected instance), and a store write that
+ *   actually persisted. On a server (no `document`) the cookie is
  *   never read, nothing is broadcast or received, `restore()` without a CSRF
  *   value is `anonymous` with no request, and a 401 leaves it `anonymous`
- *   without throwing. Server rendering of user data keeps the route-handler pattern (§4.7).
+ *   without throwing; the default coordinator is the store-scoped in-process
+ *   lock (no process-wide lock or channel, nothing shared between users). Server rendering of user data keeps the route-handler pattern (§4.7).
  */
-export function cookieSession(options: UserSessionOptions, store: TokenStore): AuthMode {
+export function cookieSession(options: UserSessionOptions): AuthMode {
   const csrfEnabled = options.csrf !== false;
   const csrfOpts = options.csrf === false ? {} : (options.csrf ?? {});
   const headerName = csrfOpts.header ?? 'X-SP-CSRF';
@@ -165,7 +212,10 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
   return {
     kind: 'userSession',
     create(ctx: ModeContext): ModeRuntime {
-      const { crossTab, owned, named, injected } = resolveSessionCrossTab(options.crossTab, store);
+      // Per client, not per userSession() call: a hoisted mode object must never share state between clients.
+      const store = options.storage ?? memoryStore();
+      const cookieKey = options.crossTab === undefined && store.storageKey === undefined ? cookieScopeKey(ctx.options.baseUrl) : undefined;
+      const { crossTab, owned, named, injected } = resolveSessionCrossTab(options.crossTab, store, cookieKey);
 
       let access: string | null = null;
       let expiresAt: number | undefined;
@@ -252,20 +302,34 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
         return pair.expires_in > 0 ? ctx.now() + pair.expires_in : undefined;
       };
 
-      /** Takes the access token (never the body refresh token) and the CSRF value from a token response. */
-      const applyPair = async (pair: TokenPairRaw, response: Response | undefined): Promise<void> => {
+      /**
+       * Takes the access token (never the body refresh token) and the CSRF value from a token
+       * response. `false` (nothing applied) when a clear ran during the store write.
+       */
+      const applyPair = async (pair: TokenPairRaw, response: Response | undefined): Promise<boolean> => {
         const token = pair.access_token;
         const exp = expiryOf(pair);
         const csrf = csrfFrom(response);
+        const clearsAtStart = clears;
         const persisted = await writeStore((t) => {
           if (csrf) t.csrf = csrf;
         });
+        if (clears !== clearsAtStart) {
+          // Logged out while writing: no token, and no CSRF value our write may have put back.
+          if (csrf && (await safeGet(store))?.csrf === csrf) {
+            await writeStore((t) => {
+              delete t.csrf;
+            });
+          }
+          return false;
+        }
         setToken(token, exp);
         if (persisted && tabContext()) {
           const m: TabMessage = { type: 'tokens', accessToken: token, expiresAt: exp ?? 0 };
           if (csrf) m.csrf = csrf;
           crossTab?.broadcast(m);
         }
+        return true;
       };
 
       /**
@@ -451,7 +515,13 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           throw e;
         }
 
-        const pair = findTokenPair(unwrap(ctx.options.unwrap ?? 'raw', raw));
+        let pair: TokenPairRaw | null;
+        try {
+          pair = findTokenPair(unwrapOrThrow(ctx.options.unwrap ?? 'raw', raw, 'refresh'));
+        } catch (e) {
+          fail(e);
+          throw e;
+        }
         if (!pair) {
           // No `body` on purpose: an invalid response may still carry token values.
           const e = new SpAuthError({ status: 0, code: 'unknown', message: 'Refresh response did not contain a token pair', module: 'refresh' });
@@ -459,7 +529,9 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           throw e;
         }
         if (clears !== clearsAtStart) throw sessionEndedError(0); // logged out meanwhile: do not resurrect
-        await applyPair(pair, response);
+        // A newer token arrived while the request was in flight (a login, or another tab's): keep it.
+        if (access !== null && access !== startedWith) return;
+        if (!(await applyPair(pair, response))) throw sessionEndedError(0); // logged out during the write
         ctx.emit({ type: 'refresh' });
       };
 
@@ -599,12 +671,12 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           }
         },
         async acceptTokens(rawBody, response) {
-          const pair = findTokenPair(unwrap(ctx.options.unwrap ?? 'raw', rawBody));
+          const pair = findTokenPair(unwrapOrThrow(ctx.options.unwrap ?? 'raw', rawBody, 'userSession'));
           if (!pair) {
             // No `body`: in `both` mode it may hold a refresh token.
             throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not contain a token pair', module: 'userSession' });
           }
-          await applyPair(pair, response);
+          if (!(await applyPair(pair, response))) throw sessionEndedError(0); // logged out during the write
         },
         async clearSession() {
           csrfAtClear = await currentCsrf();

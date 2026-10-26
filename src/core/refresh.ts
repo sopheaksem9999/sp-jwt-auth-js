@@ -2,7 +2,7 @@ import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import type { BroadcastToken, CrossTab } from './crosstab';
 import type { TokenStore, Tokens } from './stores';
 import type { ModeContext } from './types';
-import { findTokenPair, unwrap } from './unwrap';
+import { findTokenPair, unwrapOrThrow } from './unwrap';
 
 /** Single-flight refresher: concurrent callers share one in-flight refresh. */
 export interface Refresher {
@@ -98,6 +98,12 @@ export interface TokenRefreshDeps {
    * while it is still outside the refresh-ahead window. Body transport leaves it unset.
    */
   useBroadcastedToken?: (b: BroadcastToken) => void;
+  /**
+   * Counter bumped at the START of every session clear (logout). A change between
+   * the request and the store write means a logout ran meanwhile: the response is
+   * dropped, and a write that landed after the logout's own is undone.
+   */
+  cleared?: () => number;
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
@@ -136,7 +142,9 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
  * Every other failure emits `refresh_failed` (`status`, `code` only). The
  * request uses the HTTP helper's own controller and timeout, never a caller's
  * signal. If the stored refresh token changed while the request was in flight
- * (logout, login, another tab), the response is not stored.
+ * (logout, login, another tab), the response is not stored; a logout that ran
+ * during the store write (see `cleared`) wins too. A throwing function-valued
+ * `unwrap` is reported as `SpAuthError('unknown')` with a sanitised cause.
  */
 export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void> {
   const { ctx, store } = deps;
@@ -159,7 +167,10 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     if (t.accessToken) ctx.setAuthenticated(t.accessToken);
   };
 
+  const clearCount = (): number => deps.cleared?.() ?? 0;
+
   const rotate = async (startedWith: string | undefined): Promise<void> => {
+    const clearsAtStart = clearCount();
     if (deps.useBroadcastedToken && crossTab) {
       const b = crossTab.lastBroadcast();
       if (b && b.expiresAt - ctx.now() >= (ctx.options.refreshAheadSeconds ?? 60)) {
@@ -214,7 +225,13 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
       throw e;
     }
 
-    const pair = findTokenPair(unwrap(ctx.options.unwrap ?? 'raw', raw));
+    let pair: ReturnType<typeof findTokenPair>;
+    try {
+      pair = findTokenPair(unwrapOrThrow(ctx.options.unwrap ?? 'raw', raw, 'refresh'));
+    } catch (e) {
+      fail(e);
+      throw e;
+    }
     if (!pair) {
       // No `body` on purpose: an invalid response may still carry token values.
       const e = new SpAuthError({
@@ -228,6 +245,8 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     }
 
     const latest = await safeGet(store);
+    // A logout that has started but not yet written the store still counts.
+    if (clearCount() !== clearsAtStart) throw sessionEndedError(0);
     if (latest?.refreshToken !== sent) {
       // Logged out (or logged in again, or rotated elsewhere) meanwhile: do not resurrect the old session.
       if (!latest?.refreshToken) throw sessionEndedError(0);
@@ -236,6 +255,20 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     }
     const next = ctx.tokensFromPair(pair, latest);
     await store.set(next);
+    if (clearCount() !== clearsAtStart) {
+      // A logout ran during the write; if ours landed after its clear, undo it (a newer login wrote other tokens).
+      const after = await safeGet(store);
+      if (after !== null && after.accessToken === next.accessToken && after.refreshToken === next.refreshToken) {
+        const deviceId = after.deviceId;
+        try {
+          await store.set(null);
+          if (deviceId) await store.set({ deviceId });
+        } catch {
+          /* stores must not throw */
+        }
+      }
+      throw sessionEndedError(0);
+    }
     ctx.setAuthenticated(pair.access_token);
     ctx.emit({ type: 'refresh' });
     crossTab?.broadcast({ type: 'tokens', accessToken: pair.access_token, expiresAt: next.expiresAt ?? 0 });

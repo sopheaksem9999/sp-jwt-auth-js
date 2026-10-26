@@ -7,21 +7,27 @@ export interface SocialModule {
   /**
    * Pure URL builder, no network and no state change: `baseUrl` joined to
    * `endpoints.socialRedirect` with `:provider` replaced by the URL-encoded provider.
-   * Navigate the browser to it. An absolute `socialRedirect` stays absolute.
+   * Navigate the browser to it. An absolute `socialRedirect` stays absolute. A route
+   * without `:provider` throws `not_configured`.
    */
   redirectUrl(provider: string): string;
   /**
    * `POST endpoints.socialCallback` (`:provider` replaced, URL-encoded) with the callback
    * `params` (e.g. `code`, `state`) as JSON, unauthenticated, with device headers, and stores
    * the returned token pair through the normal session path (cookie transport: only the CSRF
-   * value is kept). Resolves with nothing; on any failure nothing is stored.
+   * value is kept). Resolves with nothing; on any failure nothing is stored. A route without
+   * `:provider` throws `not_configured` before any request.
    */
   completeFromCallback(provider: string, params: Record<string, string>): Promise<void>;
 }
 
 const MODULE = 'social';
 
+/** Replaces `:provider` in a configured route; a route without the placeholder is a configuration error. */
 function fill(endpoint: string, provider: unknown): string {
+  if (!endpoint.includes(':provider')) {
+    throw new SpAuthError({ status: 0, code: 'not_configured', message: 'Endpoint is missing the :provider placeholder', module: MODULE });
+  }
   if (typeof provider !== 'string' || provider === '' || provider === '.' || provider === '..') {
     throw new SpAuthError({ status: 0, code: 'invalid_request', message: 'Invalid provider', module: MODULE });
   }

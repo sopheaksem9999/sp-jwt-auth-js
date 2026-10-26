@@ -362,8 +362,9 @@ export interface SessionCrossTab {
   owned: boolean;
   /**
    * `true` when it has a real cross-tab identity: an explicit key (`true`,
-   * `{ key }`), an injected `{ instance }`, or a `webStorageStore` key. `false`
-   * for the store-scoped coordinator (memory or custom store) and for `false`.
+   * `{ key }`), an injected `{ instance }`, a `webStorageStore` key, or the
+   * cookie-scope key (cookie transport in a browser tab). `false` for the
+   * store-scoped coordinator (memory or custom store) and for `false`.
    */
   named: boolean;
   /** `true` for an injected `{ instance }` (the caller vouches for its transport). */
@@ -372,13 +373,16 @@ export interface SessionCrossTab {
 
 /**
  * Picks the coordinator for a `userSession` (see `UserSessionOptions.crossTab`).
- * ON by default only for a store with a `storageKey` (`webStorageStore`); a
- * memory or custom store gets a store-scoped in-process lock (no channel, no
- * globals), so per-request server sessions never share a lock or a token.
+ * ON by default for a store with a `storageKey` (`webStorageStore`), and, when
+ * the cookie transport passes `cookieKey` (only in a real browser tab), for any
+ * store under that key with the `storage` fallback off. Otherwise a memory or
+ * custom store gets a store-scoped in-process lock (no channel, no globals), so
+ * per-request server sessions never share a lock or a token.
  */
 export function resolveSessionCrossTab(
   option: boolean | { key?: string; instance?: CrossTab } | undefined,
   store: { readonly storageKey?: string } & object,
+  cookieKey?: string,
 ): SessionCrossTab {
   if (option === false) return { crossTab: null, owned: false, named: false, injected: false };
   if (typeof option === 'object' && option.instance) return { crossTab: option.instance, owned: false, named: true, injected: true };
@@ -387,6 +391,10 @@ export function resolveSessionCrossTab(
     const key = explicitKey ?? store.storageKey ?? 'default';
     // The storage-event fallback only makes sense for a web-storage key.
     return { crossTab: createCrossTab(key, { storageKey: store.storageKey ?? null }), owned: true, named: true, injected: false };
+  }
+  if (option === undefined && cookieKey !== undefined) {
+    // Cookie transport in a browser tab: every tab shares the one httpOnly refresh cookie.
+    return { crossTab: createCrossTab(cookieKey, { storageKey: null }), owned: true, named: true, injected: false };
   }
   return { crossTab: storeScopedCrossTab(store), owned: true, named: false, injected: false };
 }

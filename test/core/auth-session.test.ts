@@ -268,8 +268,8 @@ describe('logout', () => {
     expect((await store.get())?.accessToken).toBeUndefined();
     expect(auth.getState().status).toBe('anonymous');
     const ev = events.find((e) => e.type === 'logout');
-    expect(ev?.remoteError).toBeInstanceOf(SpAuthError);
-    expect((ev?.remoteError as SpAuthError).code).toBe('network');
+    // Only status and code: the error's body, response and cause may hold token values.
+    expect(ev?.remoteError).toEqual({ status: 0, code: 'network' });
   });
 
   it('treats 401 as already logged out (no remoteError)', async () => {

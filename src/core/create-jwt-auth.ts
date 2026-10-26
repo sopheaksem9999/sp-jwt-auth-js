@@ -1,6 +1,6 @@
 import { decodeClaims } from './claims';
 import type { Claims } from './claims';
-import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
+import { SpAuthError, isSpAuthError } from './errors';
 import { PACKAGE_REVOKE_PATH, createHttp } from './http';
 import { ANONYMOUS_STATE, authenticatedState, createState } from './state';
 import { ensureDeviceId } from './stores';
@@ -15,7 +15,7 @@ import type {
   ModeContext,
   ModeRuntime,
 } from './types';
-import { detectChallenge, findTokenPair, unwrap } from './unwrap';
+import { detectChallenge, findTokenPair, unwrap, unwrapOrThrow } from './unwrap';
 import type { TokenPairRaw } from './unwrap';
 
 export type {
@@ -107,19 +107,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
     emit,
     extractPair(rawBody: unknown, module?: string): TokenPairRaw {
       // Never `body` or the raw cause on these errors: the rejected response may still hold token values, and loggers print `cause`.
-      let unwrapped: unknown;
-      try {
-        unwrapped = unwrap(unwrapMode, rawBody);
-      } catch (e) {
-        throw new SpAuthError({
-          status: 0,
-          code: 'unknown',
-          message: 'Response could not be unwrapped',
-          module,
-          cause: sanitizedCause(e),
-        });
-      }
-      const pair = findTokenPair(unwrapped);
+      const pair = findTokenPair(unwrapOrThrow(unwrapMode, rawBody, module));
       if (!pair) {
         throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not contain a token pair', module });
       }
@@ -166,7 +154,10 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
     await runtime.acceptTokens(rawBody, response);
   };
 
+  // Bumped by every facade-level clear (logout, module clears): a token response that was in flight must not resurrect the session.
+  let clears = 0;
   const clearSession = async (): Promise<void> => {
+    clears++;
     await ready();
     if (runtime.clearSession) await runtime.clearSession();
     else state.set(ANONYMOUS_STATE);
@@ -257,8 +248,11 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         if (runtime.logout) await runtime.logout({ everywhere, accessToken });
         else await defaultServerLogout(everywhere, accessToken);
       } catch (e) {
-        // 401 = already logged out; anything else is reported on the event, never thrown.
-        if (!(isSpAuthError(e) && e.status === 401)) remoteError = e;
+        // 401 = already logged out; anything else is reported on the event, never thrown. Only
+        // `status` and `code`: the error's body, response and cause may hold token values.
+        if (!(isSpAuthError(e) && e.status === 401)) {
+          remoteError = isSpAuthError(e) ? { status: e.status, code: e.code } : { status: 0, code: 'unknown' };
+        }
       }
       emit(remoteError === undefined ? { type: 'logout', everywhere } : { type: 'logout', everywhere, remoteError });
     },
@@ -319,7 +313,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         subject = state.get().claims?.sub;
         body = await get(headers);
       }
-      const user = unwrap(unwrapMode, body);
+      const user = unwrapOrThrow(unwrapMode, body, 'whoami');
       const current = state.get();
       if (current.status === 'authenticated' && current.claims?.sub === subject) state.set({ ...current, user });
       return user;
@@ -331,6 +325,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
       // Proactive refresh first (it takes the lock itself); the call below must not refresh while holding it.
       await runtime.getAccessToken();
       const run = async (): Promise<void> => {
+        const clearsAtStart = clears;
         const body = runtime.switchCompanyBody
           ? await runtime.switchCompanyBody(companyId)
           : { company_id: companyId };
@@ -360,6 +355,10 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         // Validates the pair before anything is stored: an invalid response keeps the current tokens.
         // No `body` on the error in any transport: a rejected response may still carry token values.
         ctx.extractPair(raw, 'switchCompany');
+        // Logged out (here, or in another tab) while the request was in flight: do not resurrect the session.
+        if (clears !== clearsAtStart || state.get().status !== 'authenticated') {
+          throw new SpAuthError({ status: 0, code: 'session_ended', message: 'The session has ended', module: 'switchCompany' });
+        }
         await acceptTokens(raw, response);
         const store = runtime.store;
         if (store) {

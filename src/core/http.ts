@@ -1,4 +1,4 @@
-import { SpAuthError, authErrorFromResponse } from './errors';
+import { SpAuthError, authErrorFromResponse, sanitizedCause } from './errors';
 
 /** Options for one request made through `JwtAuth.http`. */
 export interface HttpRequest {
@@ -98,7 +98,8 @@ function parseBody(text: string): unknown {
 /**
  * Creates the request function behind `JwtAuth.http`. Caller abort rethrows the
  * caller's reason; the timeout throws `SpAuthError('timeout')`; any other fetch
- * rejection throws `SpAuthError('network')`; non-2xx throws via `authErrorFromResponse`.
+ * rejection throws `SpAuthError('network')` (both with a `cause` that keeps only the
+ * rejection's `name`); non-2xx throws via `authErrorFromResponse`.
  */
 export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<HttpResult<T>> {
   return async <T>(req: HttpRequest): Promise<HttpResult<T>> => {
@@ -139,10 +140,11 @@ export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<Htt
       } catch (e) {
         if (e instanceof SpAuthError) throw e;
         if (caller?.aborted) throw caller.reason;
+        // Only the rejection's `name`: fetch wrappers (e.g. ofetch's FetchError) carry the request options, Authorization included.
         if (timedOut) {
-          throw new SpAuthError({ status: 0, code: 'timeout', message: 'Request timed out', module, cause: e });
+          throw new SpAuthError({ status: 0, code: 'timeout', message: 'Request timed out', module, cause: sanitizedCause(e) });
         }
-        throw new SpAuthError({ status: 0, code: 'network', message: 'Network request failed', module, cause: e });
+        throw new SpAuthError({ status: 0, code: 'network', message: 'Network request failed', module, cause: sanitizedCause(e) });
       }
     } finally {
       clearTimeout(timer);

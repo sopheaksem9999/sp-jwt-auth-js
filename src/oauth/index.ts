@@ -135,7 +135,11 @@ export interface OAuthAuthorizationCodeOptions {
   authorizeUrl: string;
   /** Token URL (absolute, or a path joined to `baseUrl`); default `endpoints.oauthToken` (`/oauth/token`). */
   tokenUrl?: string;
-  /** Holds `{ state, verifier }` across the redirect; default `sessionStorage` (feature-detected, guarded), else memory. */
+  /**
+   * Holds the logins in flight across the redirect, as one map keyed by `state`
+   * (`{ [state]: { verifier, createdAt } }`, see `PendingLogins`); default
+   * `sessionStorage` (feature-detected, guarded), else memory.
+   */
   pendingStore?: PendingStore;
   /**
    * SERVER-SIDE ONLY (a confidential client): when set, the code exchange sends it
@@ -151,7 +155,8 @@ export interface OAuthAuthorizationCodeOptions {
 export interface OAuthAuthorizationCodeMode extends AuthMode {
   /**
    * Starts a login: generates `state` (256 random bits, base64url) and a PKCE
-   * verifier, persists `{ state, verifier }` in the pending store and returns the
+   * verifier, adds `{ verifier, createdAt }` under that `state` to the pending-store
+   * map (other logins in flight are kept) and returns the
    * authorize URL to navigate to. The challenge method is ALWAYS `S256` and always
    * sent (the backend would default an omitted method to `plain`). Rejects
    * `SpAuthError('not_configured')` until the mode has been passed to `createJwtAuth`.

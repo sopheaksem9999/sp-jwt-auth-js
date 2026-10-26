@@ -2,20 +2,22 @@ import { cookieSession } from './cookie';
 import type { CrossTab } from './crosstab';
 import { resolveSessionCrossTab } from './crosstab';
 import { bearerFrom } from './http';
-import { createRefresher, isSessionEnded, performTokenRefresh, waitFor } from './refresh';
+import { createRefresher, isSessionEnded, performTokenRefresh, sessionEndedError, waitFor } from './refresh';
 import { memoryStore } from './stores';
 import type { TokenStore, Tokens } from './stores';
 import type { AuthMode, ModeContext, ModeRuntime } from './types';
 
-export { bearerFrom } from './http';
-
 /** Options for `userSession`. */
 export interface UserSessionOptions {
   /**
-   * Where tokens are persisted. Default: a fresh `memoryStore()` per `userSession()`
-   * call (so on a server there are simply no tokens unless a store is passed, and
-   * nothing touches `window` or `localStorage`). With `transport: 'cookie'` it
-   * holds only non-secret state (`csrf`, `deviceId`, `lastCompanyId`).
+   * Where tokens are persisted. Default: a fresh `memoryStore()` per client (each
+   * `createJwtAuth` given this mode gets its own), so on a server there are simply
+   * no tokens unless a store is passed, nothing touches `window` or `localStorage`,
+   * and a mode object reused for several clients never shares tokens between them.
+   * A store passed here IS shared by every client created with this mode (by
+   * design): never pass one store, or one mode holding it, to clients of different
+   * users. With `transport: 'cookie'` it holds only non-secret state (`csrf`,
+   * `deviceId`, `lastCompanyId`).
    */
   storage?: TokenStore;
   /**
@@ -36,10 +38,16 @@ export interface UserSessionOptions {
   /**
    * Cross-tab coordination (spec §4.5 rule 3).
    * - Default: ON for a `webStorageStore` (lock and channel named after its
-   *   key). For a memory or custom store there is no cross-tab identity, so the
-   *   default is a store-scoped in-process lock only (instances over the SAME
-   *   store object serialise; no channel, no globals). That keeps per-request
-   *   sessions on a server fully isolated.
+   *   key). Cookie transport in a browser tab (a `document`, and Web Locks or
+   *   `BroadcastChannel`): ON for any store, keyed by the cookie's scope
+   *   (`cookie:<origin of baseUrl>`, `cookie:<location.origin>` for a relative
+   *   `baseUrl`, else `cookie:default`), because every tab shares the one
+   *   httpOnly refresh cookie and two tabs refreshing it at once would trip the
+   *   server's reuse detection. Otherwise (a memory or custom store with the body
+   *   transport, or any server) there is no cross-tab identity, so the default is
+   *   a store-scoped in-process lock only (instances over the SAME store object
+   *   serialise; no channel, no globals). That keeps per-request sessions on a
+   *   server fully isolated.
    * - `true` or `{ key }`: ON with that key (`true` without a store key uses `'default'`).
    * - `{ instance }`: a ready-made `CrossTab` (tests, or to manage it yourself;
    *   `dispose()` then only unsubscribes and does not close it).
@@ -53,7 +61,8 @@ export interface UserSessionOptions {
    * broadcast before refreshing again. `BroadcastChannel` delivery and lock
    * grants are not ordered, so without it the waiting tab can rotate a second
    * time. Ends as soon as a message arrives; an uncontended refresh never waits;
-   * the lock is held at most this much longer. Default `100`; `0` turns it off.
+   * the lock is held at most this much longer. Default `100`; `0` turns it off;
+   * values above 2147483647 (the largest timer delay) are clamped to it.
    * Ignored by the body transport (its shared store is authoritative) and on servers.
    */
   broadcastGraceMs?: number;
@@ -93,11 +102,12 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
  * unsubscribes and closes it.
  */
 export function userSession(options: UserSessionOptions = {}): AuthMode {
-  const store = options.storage ?? memoryStore();
-  if (options.transport === 'cookie') return cookieSession(options, store);
+  if (options.transport === 'cookie') return cookieSession(options);
   return {
     kind: 'userSession',
     create(baseCtx: ModeContext): ModeRuntime {
+      // Per client, not per userSession() call: a hoisted mode object must never share tokens between clients.
+      const store = options.storage ?? memoryStore();
       const { crossTab, owned } = resolveSessionCrossTab(options.crossTab, store);
       // Bumped on every local state change, so a sync triggered by another tab never applies a stale read.
       let generation = 0;
@@ -113,7 +123,10 @@ export function userSession(options: UserSessionOptions = {}): AuthMode {
         },
       };
 
+      // Bumped at the start of every clear: a token write in flight must not resurrect the session.
+      let clears = 0;
       const clearSession = async (): Promise<void> => {
+        clears++;
         const prev = await safeGet(store);
         try {
           await store.set(null);
@@ -152,7 +165,7 @@ export function userSession(options: UserSessionOptions = {}): AuthMode {
         queue = run.catch(() => undefined);
         return run;
       };
-      const rotate = performTokenRefresh({ ctx, store, clearSession, crossTab });
+      const rotate = performTokenRefresh({ ctx, store, clearSession, crossTab, cleared: () => clears });
       const refresher = createRefresher({ perform: () => exclusive(rotate) });
       const refresh = (): Promise<void> => {
         listen();
@@ -237,8 +250,23 @@ export function userSession(options: UserSessionOptions = {}): AuthMode {
         },
         async acceptTokens(rawBody) {
           const pair = ctx.extractPair(rawBody);
+          const clearsAtStart = clears;
           const tokens = ctx.tokensFromPair(pair, await safeGet(store));
           await store.set(tokens);
+          if (clears !== clearsAtStart) {
+            // Logged out during the write: undo ours if it landed after the clear, and report it.
+            const after = await safeGet(store);
+            if (after !== null && after.accessToken === tokens.accessToken) {
+              const deviceId = after.deviceId;
+              try {
+                await store.set(null);
+                if (deviceId) await store.set({ deviceId });
+              } catch {
+                /* stores must not throw */
+              }
+            }
+            throw sessionEndedError(0);
+          }
           ctx.setAuthenticated(pair.access_token);
           crossTab?.broadcast({ type: 'tokens', accessToken: pair.access_token, expiresAt: tokens.expiresAt ?? 0 });
         },

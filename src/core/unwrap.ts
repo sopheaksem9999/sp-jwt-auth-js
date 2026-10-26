@@ -1,3 +1,5 @@
+import { SpAuthError, sanitizedCause } from './errors';
+
 /** How a response body is unwrapped: none, Laravel `{data}`, the sp-laravel-api envelope, or a custom function. */
 export type Unwrap = 'raw' | 'laravel' | 'sp-laravel-api' | ((body: unknown) => unknown);
 
@@ -22,12 +24,30 @@ export function unwrap(mode: Unwrap, body: unknown): unknown {
   return isRecord(body) && 'success' in body && 'data' in body ? body.data : body;
 }
 
+/**
+ * @internal `unwrap` for the package's own response handling: an error thrown by a
+ * function-valued `unwrap` becomes `SpAuthError('unknown')` with a fixed message, no
+ * `body`, and a cause reduced to its `name` (the thrown value may carry the response).
+ */
+export function unwrapOrThrow(mode: Unwrap, body: unknown, module?: string): unknown {
+  try {
+    return unwrap(mode, body);
+  } catch (e) {
+    throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response could not be unwrapped', module, cause: sanitizedCause(e) });
+  }
+}
+
 function asPair(v: unknown): TokenPairRaw | null {
-  if (!isRecord(v) || typeof v.access_token !== 'string' || typeof v.expires_in !== 'number') return null;
+  if (!isRecord(v) || typeof v.access_token !== 'string' || v.access_token === '') return null;
+  // `0` means "unknown"; NaN, negative and infinite values are not a usable lifetime.
+  if (typeof v.expires_in !== 'number' || !Number.isFinite(v.expires_in) || v.expires_in < 0) return null;
   return v as unknown as TokenPairRaw;
 }
 
-/** Finds a token pair in an unwrapped body: the object itself, then `.token`, then `.data`. */
+/**
+ * Finds a token pair in an unwrapped body: the object itself, then `.token`, then `.data`.
+ * A pair needs a non-empty `access_token` and a finite, non-negative numeric `expires_in`.
+ */
 export function findTokenPair(unwrapped: unknown): TokenPairRaw | null {
   if (!isRecord(unwrapped)) return null;
   return asPair(unwrapped) ?? asPair(unwrapped.token) ?? asPair(unwrapped.data);

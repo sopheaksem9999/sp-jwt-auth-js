@@ -93,10 +93,26 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
   }
 }
 
+/**
+ * A random UUIDv4: `crypto.randomUUID()` where it exists (secure contexts), else built
+ * from `crypto.getRandomValues` (available on insecure origins such as plain-http
+ * intranet hosts). Throws when neither exists.
+ */
+function randomUuid(): string {
+  const c = globalThis.crypto as Partial<Crypto> | undefined;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  if (typeof c?.getRandomValues !== 'function') throw new Error('No Web Crypto random source available');
+  const b = c.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6]! & 0x0f) | 0x40; // version 4
+  b[8] = (b[8]! & 0x3f) | 0x80; // RFC 4122 variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 async function resolveDeviceId(store: TokenStore): Promise<string> {
   const existing = (await safeGet(store))?.deviceId;
   if (existing) return existing;
-  const generated = globalThis.crypto.randomUUID();
+  const generated = randomUuid();
   // Merge against a fresh read, not the earlier snapshot, so concurrent token writes are not clobbered.
   const fresh = await safeGet(store);
   if (fresh?.deviceId) return fresh.deviceId;
@@ -110,17 +126,22 @@ async function resolveDeviceId(store: TokenStore): Promise<string> {
 
 /**
  * Returns the persisted `deviceId`, or generates one with Web Crypto
- * (`crypto.randomUUID()`), stores it (other fields preserved, merged against a
- * fresh read) and returns it. Concurrent and repeat calls on the same store
- * instance share one memoised id. The id is stable per store instance within a
+ * (`crypto.randomUUID()`, else a UUIDv4 from `crypto.getRandomValues`), stores it
+ * (other fields preserved, merged against a fresh read) and returns it. Concurrent
+ * and repeat calls on the same store instance share one memoised id; a failure is
+ * not memoised, so the next call tries again. The id is stable per store instance within a
  * session; stable across reloads only if the store persists. Logout clears
  * tokens but keeps `deviceId`: `set(null)` then `set({ deviceId })`.
  */
 export function ensureDeviceId(store: TokenStore): Promise<string> {
   let p = deviceIds.get(store);
   if (!p) {
-    p = resolveDeviceId(store);
-    deviceIds.set(store, p);
+    const created = resolveDeviceId(store);
+    p = created;
+    deviceIds.set(store, created);
+    created.catch(() => {
+      if (deviceIds.get(store) === created) deviceIds.delete(store);
+    });
   }
   return p;
 }
