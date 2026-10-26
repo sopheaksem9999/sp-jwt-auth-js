@@ -138,6 +138,24 @@ describe('login', () => {
     expect((await store.get())?.deviceId).toBe(id);
   });
 
+  it('sends device headers only on device calls and never to another origin', async () => {
+    const { auth, calls } = setup(() => json({}), { device: { id: 'dev-1', name: 'Chrome' } });
+    await auth.http({ method: 'GET', endpoint: '/records' });
+    await auth.http({ method: 'POST', endpoint: 'https://evil.test/collect', device: true });
+    await auth.http({ method: 'POST', endpoint: 'https://api.test/other', device: true });
+    expect(calls[0]?.headers['x-device-id']).toBeUndefined();
+    expect(calls[0]?.headers['x-device-name']).toBeUndefined();
+    expect(calls[1]?.headers['x-device-id']).toBeUndefined();
+    expect(calls[1]?.headers['x-device-name']).toBeUndefined();
+    expect(calls[2]?.headers['x-device-id']).toBe('dev-1');
+  });
+
+  it('sends device headers on the second-factor call', async () => {
+    const { auth, calls } = setup(() => json(pair), { device: { id: 'dev-1' } });
+    await auth.verifySecondFactor({ kind: '2fa_token', token: 't' }, '1');
+    expect(calls[0]?.headers['x-device-id']).toBe('dev-1');
+  });
+
   it('sends no device headers without the device option', async () => {
     const { auth, calls } = setup(() => json(pair));
     await auth.login({});
@@ -244,18 +262,51 @@ describe('logout', () => {
     expect(calls[0]?.body).toBeUndefined();
   });
 
-  it('clears storage even when the call rejects', async () => {
-    const { auth, store } = await loggedIn(() => Promise.reject(new TypeError('offline')));
-    await auth.logout();
+  it('clears storage even when the call rejects, reporting remoteError on the event', async () => {
+    const { auth, store, events } = await loggedIn(() => Promise.reject(new TypeError('offline')));
+    await expect(auth.logout()).resolves.toBeUndefined();
     expect((await store.get())?.accessToken).toBeUndefined();
     expect(auth.getState().status).toBe('anonymous');
+    const ev = events.find((e) => e.type === 'logout');
+    expect(ev?.remoteError).toBeInstanceOf(SpAuthError);
+    expect((ev?.remoteError as SpAuthError).code).toBe('network');
   });
 
-  it('treats 401 as already logged out', async () => {
-    const { auth, store } = await loggedIn(() => json({ message: 'Unauthenticated.' }, 401));
+  it('treats 401 as already logged out (no remoteError)', async () => {
+    const { auth, store, events } = await loggedIn(() => json({ message: 'Unauthenticated.' }, 401));
     await expect(auth.logout()).resolves.toBeUndefined();
     expect(await store.get()).toBeNull();
     expect(auth.getState().status).toBe('anonymous');
+    const ev = events.find((e) => e.type === 'logout');
+    expect(ev).toBeDefined();
+    expect(ev && 'remoteError' in ev).toBe(false);
+  });
+
+  it('clears local state before the remote call, which carries the token captured before clearing', async () => {
+    let seen: { stored: unknown; status: string } | null = null;
+    const ref: { auth?: ReturnType<typeof createJwtAuth>; store?: TokenStore } = {};
+    const r = await loggedIn(async () => {
+      seen = { stored: await ref.store?.get(), status: ref.auth?.getState().status ?? '' };
+      return json({});
+    });
+    ref.auth = r.auth;
+    ref.store = r.store;
+    const states: string[] = [];
+    r.auth.subscribe(() => states.push(r.auth.getState().status));
+    await r.auth.logout();
+    expect(seen).toEqual({ stored: null, status: 'anonymous' });
+    expect(states).toEqual(['anonymous']);
+    expect(r.calls[0]?.headers.authorization).toBe(`Bearer ${access}`);
+  });
+
+  it('does not refresh before logging out, even near expiry', async () => {
+    const store = memoryStore();
+    await store.set({ accessToken: access, refreshToken: 'r1', expiresAt: now() + 5 });
+    const { auth, calls } = setup(() => new Response(null, { status: 204 }), {}, store);
+    await auth.logout();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('https://api.test/api/auth/token/revoke');
+    expect(calls[0]?.headers.authorization).toBe(`Bearer ${access}`);
   });
 
   it('keeps the deviceId', async () => {

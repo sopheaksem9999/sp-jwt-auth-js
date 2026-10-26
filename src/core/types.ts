@@ -66,8 +66,10 @@ export interface Challenge {
 export type LoginResult = { status: 'authenticated' } | { status: 'second_factor_required'; challenge: Challenge };
 
 /**
- * Event passed to `onEvent`. This task emits `login`, `logout` and
- * `session_ended`; later tasks add their own types. Hook errors are swallowed.
+ * Event passed to `onEvent`. Core emits `login`, `logout` (`everywhere`,
+ * optional `remoteError`), `refresh`, `refresh_failed` (`status`, `code`) and
+ * `session_ended`; later tasks add their own types. Payloads never carry token
+ * values. Hook errors are swallowed.
  */
 export interface AuthEvent {
   type: string;
@@ -84,13 +86,15 @@ export interface JwtAuthOptions {
   unwrap?: Unwrap;
   /** Exactly one auth mode, e.g. `userSession({ storage })`. */
   mode: AuthMode;
-  /** Refresh this many seconds before expiry (Task 15); default 60. */
+  /** `getAccessToken()` refreshes first when the token expires in fewer than this many seconds; default 60. */
   refreshAheadSeconds?: number;
   /** Claim that holds the company id; default `'company_id'`. */
   companyClaim?: string;
   /**
-   * Opt-in device headers. When set, every request sends `X-Device-Id` (`id`,
-   * else a generated id persisted in the mode's store) and `X-Device-Name` (if `name`).
+   * Opt-in device headers. When set, token-issuing calls (login, second factor,
+   * refresh, and module calls made with `http({ device: true })`) send
+   * `X-Device-Id` (`id`, else a generated id persisted in the mode's store) and
+   * `X-Device-Name` (if `name`). Never sent to an origin other than `baseUrl`'s.
    */
   device?: { id?: string; name?: string };
   /** Builds the second-factor request body; defaults per `Challenge.kind`. */
@@ -115,7 +119,11 @@ export interface ModeContext {
   emit(e: AuthEvent): void;
   /** Unwraps a raw body per `options.unwrap` and finds the token pair; throws `SpAuthError` if none. */
   extractPair(rawBody: unknown, module?: string): TokenPairRaw;
-  /** Builds stored `Tokens` from a pair, carrying over non-secret fields (`deviceId`, `csrf`, `lastCompanyId`) from `previous`. */
+  /**
+   * Builds stored `Tokens` from a pair, carrying over non-secret fields
+   * (`deviceId`, `csrf`, `lastCompanyId`) from `previous`. `expiresAt` is the
+   * JWT `exp` when it is > 0, else now + `expires_in` when that is > 0, else unset.
+   */
   tokensFromPair(pair: TokenPairRaw, previous: Tokens | null): Tokens;
   /** Current state snapshot. */
   getState(): AuthState;
@@ -133,22 +141,30 @@ export interface ModeRuntime {
   readonly store?: TokenStore | null;
   /** `credentials` applied to login, second-factor and logout calls (cookie transport). */
   readonly credentials?: 'include';
-  /** Current access token, or `null`. */
-  getAccessToken(): Promise<string | null>;
+  /** Current access token (refreshed first when due), or `null`. Aborting `signal` stops this wait only. */
+  getAccessToken(o?: { signal?: AbortSignal }): Promise<string | null>;
+  /** Stored access token as is, without refreshing (used by logout); defaults to `getAccessToken`. */
+  peekAccessToken?(): Promise<string | null>;
   /** Auth headers for API calls (`{}` when there is no token). */
   getHeaders(): Promise<Record<string, string>>;
-  /** Called on a 401: `true` when the request may be retried. */
-  handleUnauthorized(): Promise<boolean>;
+  /**
+   * Called on a 401: `true` when the request may be retried, `false` when the
+   * session is gone; rejects on a transient refresh failure (tokens kept).
+   */
+  handleUnauthorized(o?: { signal?: AbortSignal }): Promise<boolean>;
   /** Reads persisted state once and resolves `unknown` to `authenticated`/`anonymous`. */
   hydrate?(): Promise<void>;
   /** Unwraps a raw body, stores the pair and updates state. */
   acceptTokens?(rawBody: unknown): Promise<void>;
   /** Clears tokens (keeping `deviceId`) and sets state `anonymous`; no network. */
   clearSession?(): Promise<void>;
-  /** Refresh seam (Task 15: single-flight rotation). */
+  /** Single-flight refresh; rejects `SpAuthError('session_ended')` when the session is over. */
   refresh?(): Promise<void>;
-  /** Server-side part of logout, replacing the default; the facade clears the session afterwards regardless. */
-  logout?(o?: { everywhere?: boolean }): Promise<void>;
+  /**
+   * Server-side part of logout, replacing the default. The facade has already
+   * cleared the session; `accessToken` is the token captured before clearing.
+   */
+  logout?(o: { everywhere?: boolean; accessToken: string | null }): Promise<void>;
   /** Restores a session from the server (Task 20, cookie transport). */
   restore?(): Promise<void>;
 }
@@ -165,15 +181,28 @@ export interface JwtAuth {
   login(credentials: Record<string, unknown>): Promise<LoginResult>;
   /** POSTs the challenge and code to `endpoints.secondFactor` and stores the pair. */
   verifySecondFactor(c: Challenge, code: string): Promise<void>;
-  /** Server logout (best effort), then clears storage even if the call failed. */
+  /**
+   * Clears local state and storage first (keeping `deviceId`), then revokes
+   * server-side (best effort) with the token captured before clearing. Never
+   * rejects; a failure other than 401 is reported as `remoteError` on the `logout` event.
+   */
   logout(o?: { everywhere?: boolean }): Promise<void>;
-  /** Current access token or `null`. */
-  getAccessToken(): Promise<string | null>;
+  /**
+   * Current access token or `null`; refreshes first (single flight) when it is
+   * within `refreshAheadSeconds` of expiry. Aborting `signal` rejects this call
+   * with the signal's reason without cancelling the shared refresh.
+   */
+  getAccessToken(o?: { signal?: AbortSignal }): Promise<string | null>;
   /** `{ Authorization: 'Bearer …' }` or `{}`: the `ApiAuth` contract. */
   getHeaders(): Promise<Record<string, string>>;
-  /** 401 handler; `true` when the request may be retried once. */
-  handleUnauthorized(): Promise<boolean>;
-  /** Refreshes now (Task 15); throws `not_configured` when the mode cannot refresh. */
+  /**
+   * 401 handler: refreshes once (shared single flight). Resolves `true` when the
+   * request may be retried once, `false` when the session is gone (state
+   * `anonymous`, `session_ended` emitted); rejects with the `SpAuthError` on a
+   * network error, timeout, 5xx or other non-401 failure, tokens kept.
+   */
+  handleUnauthorized(o?: { signal?: AbortSignal }): Promise<boolean>;
+  /** Refreshes now (single flight); throws `not_configured` when the mode cannot refresh, `session_ended` when the session is over. */
   refresh(): Promise<void>;
   /** Resolves once persisted state has been read (state leaves `unknown`). */
   ready(): Promise<void>;

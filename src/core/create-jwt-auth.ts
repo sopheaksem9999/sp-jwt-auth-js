@@ -120,12 +120,10 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     tokensFromPair(pair: TokenPairRaw, previous: Tokens | null): Tokens {
       const t: Tokens = { accessToken: pair.access_token };
       if (pair.refresh_token) t.refreshToken = pair.refresh_token;
-      // expires_in is relative, so it is immune to client clock skew; JWT exp is the fallback (0 = absent).
-      if (pair.expires_in > 0) t.expiresAt = now() + pair.expires_in;
-      else {
-        const exp = decodeClaims(pair.access_token)?.exp ?? 0;
-        if (exp > 0) t.expiresAt = exp;
-      }
+      // Spec §4.5: JWT exp first, falling back to expires_in (opaque tokens). 0 means absent for both.
+      const exp = decodeClaims(pair.access_token)?.exp;
+      if (typeof exp === 'number' && exp > 0) t.expiresAt = exp;
+      else if (pair.expires_in > 0) t.expiresAt = now() + pair.expires_in;
       if (previous?.deviceId) t.deviceId = previous.deviceId;
       if (previous?.csrf) t.csrf = previous.csrf;
       if (previous?.lastCompanyId) t.lastCompanyId = previous.lastCompanyId;
@@ -166,14 +164,14 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     else state.set(ANONYMOUS_STATE);
   };
 
-  const defaultServerLogout = async (everywhere: boolean): Promise<void> => {
+  const defaultServerLogout = async (everywhere: boolean, accessToken: string | null): Promise<void> => {
     const host = o.endpoints.logout;
-    if (!host && !(await runtime.getAccessToken())) return; // nothing to revoke
+    if (!host && !accessToken) return; // nothing to revoke
     await http({
       method: 'POST',
       endpoint: host || PACKAGE_REVOKE_PATH,
       body: host && everywhere ? { everywhere: true } : undefined,
-      bearer: true,
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       credentials: runtime.credentials,
       module: 'logout',
     });
@@ -187,6 +185,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         method: 'POST',
         endpoint: path,
         body: credentials,
+        device: true,
         credentials: runtime.credentials,
         module: 'login',
       });
@@ -209,6 +208,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         method: 'POST',
         endpoint: path,
         body: build(c, code),
+        device: true,
         credentials: runtime.credentials,
         module: 'secondFactor',
       });
@@ -219,21 +219,33 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     async logout(opts) {
       await ready();
       const everywhere = opts?.everywhere === true;
+      // Capture without refreshing: a refresh here would rotate tokens we are about to revoke.
+      let accessToken: string | null = null;
+      try {
+        accessToken = runtime.peekAccessToken ? await runtime.peekAccessToken() : await runtime.getAccessToken();
+      } catch {
+        accessToken = null;
+      }
+      // Local state goes first, so the app is logged out even if the network call hangs.
+      try {
+        await clearSession();
+      } catch {
+        state.set(ANONYMOUS_STATE);
+      }
       let remoteError: unknown;
       try {
-        if (runtime.logout) await runtime.logout(opts);
-        else await defaultServerLogout(everywhere);
+        if (runtime.logout) await runtime.logout({ everywhere, accessToken });
+        else await defaultServerLogout(everywhere, accessToken);
       } catch (e) {
         // 401 = already logged out; anything else is reported on the event, never thrown.
         if (!(isSpAuthError(e) && e.status === 401)) remoteError = e;
       }
-      await clearSession();
       emit(remoteError === undefined ? { type: 'logout', everywhere } : { type: 'logout', everywhere, remoteError });
     },
 
-    async getAccessToken() {
+    async getAccessToken(opts) {
       await ready();
-      return runtime.getAccessToken();
+      return runtime.getAccessToken(opts);
     },
 
     async getHeaders() {
@@ -241,9 +253,9 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
       return runtime.getHeaders();
     },
 
-    async handleUnauthorized() {
+    async handleUnauthorized(opts) {
       await ready();
-      return runtime.handleUnauthorized();
+      return runtime.handleUnauthorized(opts);
     },
 
     async refresh() {

@@ -9,6 +9,12 @@ export interface HttpRequest {
   body?: unknown;
   /** Adds the mode's auth headers (`Authorization: Bearer …`). */
   bearer?: boolean;
+  /**
+   * Sends the device headers (`X-Device-Id`/`X-Device-Name`, when the `device`
+   * option is set). Only token-issuing calls (login, second factor, refresh) set
+   * this; the headers are never sent to an origin other than `baseUrl`'s.
+   */
+  device?: boolean;
   credentials?: 'include';
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -36,11 +42,27 @@ export interface HttpDeps {
 /** Default request timeout in milliseconds. */
 export const DEFAULT_TIMEOUT_MS = 60_000;
 
+const ABSOLUTE_URL = /^https?:\/\//i;
+
 /** Joins `endpoint` onto `baseUrl` (trailing slashes stripped); full http(s) URLs pass through. */
 export function resolveUrl(baseUrl: string, endpoint: string): string {
-  if (/^https?:\/\//i.test(endpoint)) return endpoint;
+  if (ABSOLUTE_URL.test(endpoint)) return endpoint;
   const base = baseUrl.replace(/\/+$/, '');
   return base + (endpoint.startsWith('/') ? endpoint : `/${endpoint}`);
+}
+
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+/** `true` when `url` (already resolved) has the same origin as `baseUrl`. */
+export function sameOrigin(baseUrl: string, url: string): boolean {
+  const a = originOf(baseUrl);
+  return a !== null && a === originOf(url);
 }
 
 function parseBody(text: string): unknown {
@@ -60,7 +82,11 @@ function parseBody(text: string): unknown {
 export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<HttpResult<T>> {
   return async <T>(req: HttpRequest): Promise<HttpResult<T>> => {
     const doFetch = deps.fetch ?? globalThis.fetch;
-    const headers: Record<string, string> = { Accept: 'application/json', ...(await deps.deviceHeaders()) };
+    const url = resolveUrl(deps.baseUrl, req.endpoint);
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    // A path is joined to baseUrl, so only an absolute endpoint can leave baseUrl's origin.
+    const deviceAllowed = !ABSOLUTE_URL.test(req.endpoint) || sameOrigin(deps.baseUrl, url);
+    if (req.device === true && deviceAllowed) Object.assign(headers, await deps.deviceHeaders());
     if (req.body !== undefined) headers['Content-Type'] = 'application/json';
     if (req.bearer === true) Object.assign(headers, await deps.authHeaders());
     Object.assign(headers, req.headers ?? {});
@@ -84,7 +110,7 @@ export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<Htt
       if (req.body !== undefined) init.body = JSON.stringify(req.body);
       if (req.credentials !== undefined) init.credentials = req.credentials;
       try {
-        response = await doFetch(resolveUrl(deps.baseUrl, req.endpoint), init);
+        response = await doFetch(url, init);
         if (!response.ok) throw await authErrorFromResponse(response, { module });
         text = await response.text();
       } catch (e) {
