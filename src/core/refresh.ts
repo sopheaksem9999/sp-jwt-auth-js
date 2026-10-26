@@ -1,5 +1,5 @@
 import { SpAuthError, isSpAuthError } from './errors';
-import type { CrossTab } from './crosstab';
+import type { BroadcastToken, CrossTab } from './crosstab';
 import type { TokenStore, Tokens } from './stores';
 import type { ModeContext } from './types';
 import { findTokenPair, unwrap } from './unwrap';
@@ -97,7 +97,7 @@ export interface TokenRefreshDeps {
    * inside the lock a token another tab broadcast is used instead of refreshing
    * while it is still outside the refresh-ahead window. Body transport leaves it unset.
    */
-  useBroadcastedToken?: (b: { accessToken: string; expiresAt: number }) => void;
+  useBroadcastedToken?: (b: BroadcastToken) => void;
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {

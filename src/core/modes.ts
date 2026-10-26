@@ -1,7 +1,7 @@
 import { SpAuthError, isSpAuthError } from './errors';
 import { createRefresher, waitFor } from './refresh';
 import type { AuthMode, ModeContext, ModeRuntime } from './types';
-import { bearerFrom } from './user-session';
+import { bearerFrom } from './http';
 
 /*
  * Server-side modes. None of them touches `window`, `document`, `localStorage`,

@@ -27,6 +27,17 @@ export interface HttpRequest {
   module?: string;
 }
 
+/** Token from an `Authorization: Bearer …` header (header name and scheme case-insensitive), or `null`. */
+export function bearerFrom(headers: Record<string, string> | undefined): string | null {
+  if (!headers) return null;
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() !== 'authorization') continue;
+    const m = /^\s*bearer\s+(\S+)\s*$/i.exec(v);
+    return m?.[1] ?? null;
+  }
+  return null;
+}
+
 /** Successful response: parsed JSON body (`null` when empty, the text when not JSON) and the consumed `Response`. */
 export interface HttpResult<T> {
   body: T;
@@ -43,6 +54,9 @@ export interface HttpDeps {
   /** Auth headers for `bearer: true`. */
   authHeaders(): Promise<Record<string, string>>;
 }
+
+/** Package route used by `logout()` when no host `endpoints.logout` is configured. */
+export const PACKAGE_REVOKE_PATH = '/auth/token/revoke';
 
 /** Default request timeout in milliseconds. */
 export const DEFAULT_TIMEOUT_MS = 60_000;

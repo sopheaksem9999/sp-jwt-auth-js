@@ -475,14 +475,8 @@ describe('http', () => {
 });
 
 describe('userSession', () => {
-  it("throws not_configured for transport 'cookie' (not implemented yet)", () => {
-    let err: unknown;
-    try {
-      userSession({ storage: memoryStore(), transport: 'cookie' });
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(SpAuthError);
-    expect((err as SpAuthError).code).toBe('not_configured');
+  it("transport 'cookie' creates a mode (implemented in cookie.ts; see cookie.test.ts)", () => {
+    const mode = userSession({ storage: memoryStore(), transport: 'cookie' });
+    expect(mode.kind).toBe('userSession');
   });
 });

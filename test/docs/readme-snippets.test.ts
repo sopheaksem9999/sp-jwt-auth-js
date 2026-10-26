@@ -228,6 +228,71 @@ describe('README servers: one instance per request', () => {
   });
 });
 
+describe('README cookie transport', () => {
+  it('restores, logs in and out with credentials and X-SP-CSRF; localStorage never holds a token', async () => {
+    const BODY_RT = 'rt-readme-cookie-never-stored';
+    const cookieCalls: { path: string; headers: Headers; credentials: RequestCredentials | undefined; body: unknown }[] = [];
+    vi.stubGlobal('fetch', (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      cookieCalls.push({ path, headers: new Headers(init?.headers), credentials: init?.credentials, body: init?.body });
+      if (path === '/auth/login') {
+        // backend `both` mode: the body still carries refresh_token; the client drops it
+        const body = { access_token: 'at-cookie', refresh_token: BODY_RT, expires_in: 900, token_type: 'Bearer' };
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json', 'X-SP-CSRF': 'csrf-1' } });
+      }
+      return new Response(null, { status: 204 }); // revoke
+    }) as unknown as typeof fetch);
+    const written: string[] = [];
+    const ls = fakeLocalStorage();
+    const setItem = ls.setItem.bind(ls);
+    ls.setItem = (k: string, v: string) => {
+      written.push(v);
+      setItem(k, v);
+    };
+    vi.stubGlobal('localStorage', ls);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    // #region snippet:cookie
+    // import { createJwtAuth, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+
+    const auth = createJwtAuth({
+      baseUrl: 'https://api.example.com',
+      // refresh and revoke stay on the package routes, under the cookie's path (/auth/token)
+      endpoints: { login: '/auth/login' },
+      mode: userSession({
+        transport: 'cookie',
+        storage: webStorageStore('localStorage', 'app_auth'), // only csrf, deviceId, lastCompanyId
+      }),
+    });
+
+    await auth.restore(); // page load: one refresh through the cookie; no session -> 'anonymous'
+    console.log(auth.getState().status); // 'anonymous'
+
+    await auth.login({ email: 'ada@example.com', password: 'correct horse' });
+    console.log(auth.getState().status); // 'authenticated'
+    console.log(await auth.getHeaders()); // { Authorization: 'Bearer ...' }, from memory
+
+    await auth.logout(); // revokes with the bearer AND the cookie (+ X-SP-CSRF)
+    auth.dispose?.();
+    // #endregion
+
+    expect(log).toHaveBeenNthCalledWith(1, 'anonymous');
+    expect(log).toHaveBeenNthCalledWith(2, 'authenticated');
+    expect(log).toHaveBeenNthCalledWith(3, { Authorization: 'Bearer at-cookie' });
+    // no csrf value yet, so restore() made no request
+    expect(cookieCalls.map((c) => c.path)).toEqual(['/auth/login', '/auth/token/revoke']);
+    expect(cookieCalls.map((c) => c.credentials)).toEqual(['include', 'include']);
+    expect(cookieCalls[1]!.headers.get('Authorization')).toBe('Bearer at-cookie');
+    expect(cookieCalls[1]!.headers.get('X-SP-CSRF')).toBe('csrf-1');
+    expect(written).toContain(JSON.stringify({ csrf: 'csrf-1' }));
+    for (const v of written) {
+      expect(v).not.toContain(BODY_RT);
+      expect(v).not.toContain('at-cookie');
+    }
+    expect(ls.getItem('app_auth')).toBeNull(); // logout cleared the csrf value
+  });
+});
+
 function region(source: string, name: string): string {
   const m = new RegExp(`// #region snippet:${name}\\n([\\s\\S]*?)\\n\\s*// #endregion`).exec(source);
   if (m === null) throw new Error(`no region ${name} in test file`);
@@ -252,7 +317,7 @@ function normalise(code: string): string {
 }
 
 describe('README stays in sync with this file', () => {
-  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest'])('snippet %s matches', (name) => {
+  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest', 'cookie'])('snippet %s matches', (name) => {
     expect(block(readme, name)).toBe(region(self, name));
   });
 

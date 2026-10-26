@@ -2,7 +2,7 @@
 
 Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (coming in a later release).
 
-> Status: **0.1, core only.** The core session (`createJwtAuth` with `userSession`) is what this release ships. Everything marked "coming in 0.2 / later" below is **not available yet**; do not build on it.
+> Status: **0.1, core only.** The core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport) is what this release ships. Everything marked "coming in 0.2 / later" below is **not available yet**; do not build on it.
 
 ## Install
 
@@ -92,6 +92,46 @@ const state = from((set) => auth.subscribe(() => set(auth.getState())));
 
 **Angular and `fetch`.** The client calls `fetch`, not Angular's `HttpClient`, so `HttpClient` interceptors do not see these requests. Put logging or loading state in a wrapper passed as the `fetch` option (a function that calls the real `fetch` and adds the concern). Tests mock through the same `fetch` option. Zone.js tracks `fetch`, so change detection and SSR stability work unchanged.
 
+## Cookie transport (httpOnly refresh cookie)
+
+With the default body transport the 60-day refresh token sits in `localStorage`, where any XSS can read it. With `transport: 'cookie'` JavaScript never sees it: the backend keeps it in an httpOnly cookie. Available now; needs `sopheak/sp-jwt-auth` **0.1.25+** with `SP_JWT_REFRESH_TRANSPORT=cookie` (`both` during a migration) and host login routes wrapped with `TokenResponse::withRefreshCookie()`.
+
+<!-- snippet:cookie -->
+```ts
+// import { createJwtAuth, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+
+const auth = createJwtAuth({
+  baseUrl: 'https://api.example.com',
+  // refresh and revoke stay on the package routes, under the cookie's path (/auth/token)
+  endpoints: { login: '/auth/login' },
+  mode: userSession({
+    transport: 'cookie',
+    storage: webStorageStore('localStorage', 'app_auth'), // only csrf, deviceId, lastCompanyId
+  }),
+});
+
+await auth.restore(); // page load: one refresh through the cookie; no session -> 'anonymous'
+console.log(auth.getState().status); // 'anonymous'
+
+await auth.login({ email: 'ada@example.com', password: 'correct horse' });
+console.log(auth.getState().status); // 'authenticated'
+console.log(await auth.getHeaders()); // { Authorization: 'Bearer ...' }, from memory
+
+await auth.logout(); // revokes with the bearer AND the cookie (+ X-SP-CSRF)
+auth.dispose?.();
+```
+
+- **Where things live.** Refresh token: the httpOnly cookie `sp_refresh_token` (path `/auth/token`); the client never reads, stores or sends it, and drops a body `refresh_token` (`both` mode) unread. Access token: memory only. `storage` keeps only non-secret state (`csrf`, `deviceId`, `lastCompanyId`); use `webStorageStore('localStorage', …)` so new tabs and reloads have the CSRF value (`sessionStorage` would leave new tabs without it).
+- **Requests.** Login, second factor, refresh, logout, whoami and company switch send `credentials: 'include'`. Refresh sends no body. `switchCompany` sends `{ company_id }` only.
+- **Routes.** The cookie is scoped to `/{route_prefix}/token`, so keep `endpoints.refresh` (default `/auth/token/refresh`) and the revoke route (`/auth/token/revoke`, the default when `endpoints.logout` is unset) under that path. A host refresh route elsewhere (such as the presets' `/auth/refresh`) never receives the cookie.
+- **Page load: call `auth.restore()`.** The state stays `unknown` until it resolves. It calls refresh once: success is `authenticated`; a 401 is "not logged in" (`anonymous`, no error, no `session_ended`); with no CSRF value at all it is `anonymous` without a request. A 403 rejects with `SpAuthError('csrf_failed')` and leaves the state alone (a setup error, see below); a network error or 5xx rejects too, so call it again. For the body transport `restore()` is just `ready()`.
+- **CSRF (double-submit).** Every response that sets the refresh cookie also sets a readable `sp_csrf` cookie and returns the value in the `X-SP-CSRF` response header. The client takes the header first, else `readCookie('sp_csrf')` (also exported), stores it, broadcasts it to other tabs and echoes it as the `X-SP-CSRF` request header on refresh, revoke and company switch. Names are options matching the backend's `token_endpoints.csrf`: `csrf: { header: 'X-SP-CSRF', cookie: 'sp_csrf' }`; `csrf: false` when the backend switched CSRF off. A refresh 403 never ends the session.
+- **Origins.**
+  - *Same host, or a same-site subdomain* (`app.example.com` → `api.example.com`): the default `SameSite=strict` works. For subdomains set `SP_JWT_REFRESH_COOKIE_DOMAIN=.example.com`, or leave it unset and list `X-SP-CSRF` in CORS `exposed_headers` so the response header is readable.
+  - *Different site:* `SP_JWT_REFRESH_COOKIE_SAME_SITE=none` (forces `Secure`), CORS `supports_credentials` with exact origins, and **`X-SP-CSRF` in `exposed_headers`** (the host's `config/cors.php`; the package cannot set it). Without it the browser hides the header, the client has no value and refresh answers 403: `csrf_failed`, whose message names `exposed_headers`.
+- **Tabs.** The cookie is shared, each tab's access token is in its own memory. Refreshes take the cross-tab lock; the tab that refreshed broadcasts the new access token (and CSRF value, never a refresh token), and a tab waiting for the lock uses it instead of refreshing again. Tokens are broadcast, and accepted, only in a real browser tab (a `document`, a `BroadcastChannel`, a `webStorageStore` or explicit `crossTab` key).
+- **Browser only.** On a server there is no cookie jar and no `document`: the cookie is never read, nothing is broadcast, `restore()` stays `anonymous` without throwing (so SSR of client components renders). Node, Express and NestJS keep the server modes and the per-request pattern below. **Server rendering with user data** (Next.js server components, Nuxt, SvelteKit, Astro, Angular SSR) still needs an access token on the server, so those apps keep the route-handler pattern in [Next.js](#nextjs-and-other-server-rendering-frameworks).
+
 ## Servers: one instance per request
 
 Never share an auth client, or its store, between users. On a server create a client per request and drop it afterwards:
@@ -121,14 +161,14 @@ requestAuth.dispose?.();
 
 A token seeded without a refresh token is never refreshed: once it expires the session ends and `getHeaders()` returns `{}`.
 
-**Coming in 0.2 / later tasks (not in this release):** `staticToken(() => token)` (the idiomatic per-request mode for a token your server already holds), `clientCredentials` and `apiKey` modes for server-to-server calls, the httpOnly-cookie transport (`userSession({ transport: 'cookie' })` currently throws `not_configured`), and the `otp`, `mfa`, `sessions`, `oauth`, `social`, `account` and `verify` modules. They are described in the design spec but ship later.
+**Coming in 0.2 / later tasks (not in this release):** `staticToken(() => token)` (the idiomatic per-request mode for a token your server already holds), `clientCredentials` and `apiKey` modes for server-to-server calls, and the `otp`, `mfa`, `sessions`, `oauth`, `social`, `account` and `verify` modules. They are described in the design spec but ship later.
 
 ### Next.js (and other server-rendering frameworks)
 
 Which pattern fits depends on whether the **server** renders user data.
 
-- **Only client components load user data:** use the body-transport quick start above in client components, like a Vue SPA. The cookie transport (coming later) will cover the httpOnly variant.
-- **Server components load user data:** keep the tokens in **httpOnly cookies set by a Next route handler**. The handler proxies login, refresh and logout to Laravel and sets the app's *own* cookies; server components read that cookie and use the access token (with `staticToken` once it ships; until then with the per-request pattern above); client components call the route handler, not Laravel, for refresh. Laravel's own refresh cookie belongs to Laravel's path, so the server cannot read it, which is why the route handler stays even after the cookie transport lands.
+- **Only client components load user data:** use the [cookie transport](#cookie-transport-httponly-refresh-cookie) against Laravel directly, like an SPA, with no route handler (cross-site needs `X-SP-CSRF` in CORS `exposed_headers`). The body-transport quick start also works there, like a Vue SPA.
+- **Server components load user data:** keep the tokens in **httpOnly cookies set by a Next route handler**. The handler proxies login, refresh and logout to Laravel and sets the app's *own* cookies; server components read that cookie and use the access token (with `staticToken` once it ships; until then with the per-request pattern above); client components call the route handler, not Laravel, for refresh. Laravel's own refresh cookie belongs to Laravel's path, so the server cannot read it, which is why the route handler stays even with the cookie transport.
 - The same split applies to Nuxt, SvelteKit, Astro and Angular SSR.
 
 The login route handler, illustrative and **not executed** (not part of the test suite; the cookie names, URL and error handling are yours to decide):
@@ -215,7 +255,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 | `delivery_failed` | HTTP 502: the server could not deliver a code (SMS or e-mail). |
 | `not_configured` | A route or option the call needs is not set (or the mode cannot do it). |
 | `module_disabled` | HTTP 404 on a module's route: the host has switched that module off. |
-| `csrf_failed` | HTTP 403 on a cookie-transport call: the CSRF header is missing or wrong (a setup error, the state is kept). |
+| `csrf_failed` | HTTP 403 on a cookie-transport refresh: the `X-SP-CSRF` header is missing or wrong (a setup error; the session and state are kept). Cross-site, check CORS `exposed_headers`. |
 | `invalid_token` | A token was rejected or malformed. |
 | `network` | The request failed before a response (offline, DNS, CORS). |
 | `timeout` | The request exceeded `timeoutMs`. |
@@ -227,9 +267,9 @@ Each module is a function that takes the core auth object. **Only the core ships
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
-| Core: `JwtTokenService`, guard, `TokenContext`; `token_endpoints`; host login / 2FA | `@sopheak/sp-jwt-auth` | `createJwtAuth`, `userSession`, state/subscribe, `memoryStore` / `webStorageStore`, refresh rules, `getHeaders`, `handleUnauthorized`, scope checks, claims, single flight, cross-tab lock, `login`, `verifySecondFactor`, `logout`, `whoami`, `switchCompany`, `presets` | **0.1** |
+| Core: `JwtTokenService`, guard, `TokenContext`; `token_endpoints`; host login / 2FA | `@sopheak/sp-jwt-auth` | `createJwtAuth`, `userSession`, state/subscribe, `memoryStore` / `webStorageStore`, refresh rules, `getHeaders`, `handleUnauthorized`, scope checks, claims, single flight, cross-tab lock, `login`, `verifySecondFactor`, `logout`, `whoami`, `switchCompany`, `presets`, cookie transport (`transport: 'cookie'`, `restore()`, `readCookie`) | **0.1** |
 | `api_keys` | `@sopheak/sp-jwt-auth` (core) | `apiKey()` mode | coming in 0.2 / later |
-| (server tokens) | `@sopheak/sp-jwt-auth` (core) | `staticToken()` mode, cookie transport | coming in 0.2 / later |
+| (server tokens) | `@sopheak/sp-jwt-auth` (core) | `staticToken()` mode | coming in 0.2 / later |
 | `first_factor_otp` | `@sopheak/sp-jwt-auth/otp` | `otp(auth)` | coming later |
 | `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | coming later |
 | Sessions | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)` | coming later |

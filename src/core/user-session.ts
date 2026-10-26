@@ -1,21 +1,38 @@
-import { createCrossTab, storeScopedCrossTab } from './crosstab';
+import { cookieSession } from './cookie';
 import type { CrossTab } from './crosstab';
-import { SpAuthError } from './errors';
+import { resolveSessionCrossTab } from './crosstab';
+import { bearerFrom } from './http';
 import { createRefresher, isSessionEnded, performTokenRefresh, waitFor } from './refresh';
 import { memoryStore } from './stores';
 import type { TokenStore, Tokens } from './stores';
 import type { AuthMode, ModeContext, ModeRuntime } from './types';
+
+export { bearerFrom } from './http';
 
 /** Options for `userSession`. */
 export interface UserSessionOptions {
   /**
    * Where tokens are persisted. Default: a fresh `memoryStore()` per `userSession()`
    * call (so on a server there are simply no tokens unless a store is passed, and
-   * nothing touches `window` or `localStorage`).
+   * nothing touches `window` or `localStorage`). With `transport: 'cookie'` it
+   * holds only non-secret state (`csrf`, `deviceId`, `lastCompanyId`).
    */
   storage?: TokenStore;
-  /** `'body'` (default): refresh token in storage. `'cookie'`: httpOnly cookie (not implemented yet). */
+  /**
+   * `'body'` (default): the refresh token is kept in `storage` and sent in the
+   * request body. `'cookie'` (spec §4.3, backend `SP_JWT_REFRESH_TRANSPORT=cookie`):
+   * the refresh token is an httpOnly cookie JavaScript never sees, the access
+   * token lives in memory only, and the app calls `auth.restore()` on page load.
+   * Browser only; see `cookieSession` for the full behaviour.
+   */
   transport?: 'body' | 'cookie';
+  /**
+   * Cookie transport only: the CSRF double-submit names, matching the backend's
+   * `token_endpoints.csrf` config. Defaults `{ header: 'X-SP-CSRF', cookie: 'sp_csrf' }`.
+   * `false` when the backend has CSRF switched off (`csrf.enabled = false`):
+   * no header is sent and `restore()` always tries the refresh.
+   */
+  csrf?: { header?: string; cookie?: string } | false;
   /**
    * Cross-tab coordination (spec §4.5 rule 3).
    * - Default: ON for a `webStorageStore` (lock and channel named after its
@@ -31,19 +48,6 @@ export interface UserSessionOptions {
   crossTab?: boolean | { key?: string; instance?: CrossTab };
 }
 
-function resolveCrossTab(options: UserSessionOptions, store: TokenStore): { crossTab: CrossTab | null; owned: boolean } {
-  const o = options.crossTab;
-  if (o === false) return { crossTab: null, owned: false };
-  if (typeof o === 'object' && o.instance) return { crossTab: o.instance, owned: false };
-  const explicitKey = typeof o === 'object' ? o.key : undefined;
-  if (o === true || explicitKey !== undefined || store.storageKey !== undefined) {
-    const key = explicitKey ?? store.storageKey ?? 'default';
-    // The storage-event fallback only makes sense for a web-storage key.
-    return { crossTab: createCrossTab(key, { storageKey: store.storageKey ?? null }), owned: true };
-  }
-  return { crossTab: storeScopedCrossTab(store), owned: true };
-}
-
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
   try {
     return await store.get();
@@ -52,19 +56,9 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
   }
 }
 
-/** Token from an `Authorization: Bearer …` header (header name and scheme case-insensitive), or `null`. */
-export function bearerFrom(headers: Record<string, string> | undefined): string | null {
-  if (!headers) return null;
-  for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() !== 'authorization') continue;
-    const m = /^\s*bearer\s+(\S+)\s*$/i.exec(v);
-    return m?.[1] ?? null;
-  }
-  return null;
-}
-
 /**
- * Browser / single-user session mode: login, logout, tokens persisted in `storage`.
+ * Browser / single-user session mode: login, logout, tokens persisted in `storage`
+ * (body transport; `transport: 'cookie'` is described on `cookieSession`).
  *
  * Hydration: a stored access token hydrates as `authenticated`. If it is past
  * `expiresAt` it still hydrates as `authenticated` when a refresh token is
@@ -88,19 +82,12 @@ export function bearerFrom(headers: Record<string, string> | undefined): string 
  * unsubscribes and closes it.
  */
 export function userSession(options: UserSessionOptions = {}): AuthMode {
-  if (options.transport === 'cookie') {
-    throw new SpAuthError({
-      status: 0,
-      code: 'not_configured',
-      message: 'cookie transport not implemented yet',
-      module: 'userSession',
-    });
-  }
   const store = options.storage ?? memoryStore();
+  if (options.transport === 'cookie') return cookieSession(options, store);
   return {
     kind: 'userSession',
     create(baseCtx: ModeContext): ModeRuntime {
-      const { crossTab, owned } = resolveCrossTab(options, store);
+      const { crossTab, owned } = resolveSessionCrossTab(options.crossTab, store);
       // Bumped on every local state change, so a sync triggered by another tab never applies a stale read.
       let generation = 0;
       const ctx: ModeContext = {

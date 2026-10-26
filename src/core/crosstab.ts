@@ -1,9 +1,19 @@
 /**
  * Message sent between tabs (spec §4.5 rule 3). `tokens` carries the ACCESS
  * token and its expiry (epoch seconds, `0` when unknown) only, never a refresh
- * token; `logout` says the shared session was cleared.
+ * token, plus (cookie transport only) the non-secret CSRF double-submit value;
+ * `logout` says the shared session was cleared.
  */
-export type TabMessage = { type: 'tokens'; accessToken: string; expiresAt: number } | { type: 'logout' };
+export type TabMessage = { type: 'tokens'; accessToken: string; expiresAt: number; csrf?: string } | { type: 'logout' };
+
+/** A token another tab broadcast (see `CrossTab.lastBroadcast`). */
+export interface BroadcastToken {
+  accessToken: string;
+  /** Epoch seconds, `0` when unknown. */
+  expiresAt: number;
+  /** Cookie transport: the CSRF value that came with it. */
+  csrf?: string;
+}
 
 /** Cross-tab coordination for one storage key. */
 export interface CrossTab {
@@ -14,7 +24,7 @@ export interface CrossTab {
   /** Registers a listener for messages from other tabs; returns the unsubscribe function. Listener errors are swallowed. */
   onMessage(cb: (m: TabMessage) => void): () => void;
   /** The last token another tab broadcast (reset by a `logout` from anywhere), or `null`. */
-  lastBroadcast(): { accessToken: string; expiresAt: number } | null;
+  lastBroadcast(): BroadcastToken | null;
   /** Removes every listener and closes the channel. `withLock` keeps working; `broadcast` becomes a no-op. */
   close(): void;
 }
@@ -123,7 +133,9 @@ function sanitize(data: unknown): TabMessage | null {
   if (d.type === 'logout') return { type: 'logout' };
   if (d.type === 'tokens' && typeof d.accessToken === 'string' && d.accessToken !== '') {
     const expiresAt = typeof d.expiresAt === 'number' && Number.isFinite(d.expiresAt) ? d.expiresAt : 0;
-    return { type: 'tokens', accessToken: d.accessToken, expiresAt };
+    const m: TabMessage = { type: 'tokens', accessToken: d.accessToken, expiresAt };
+    if (typeof d.csrf === 'string' && d.csrf !== '') m.csrf = d.csrf;
+    return m;
   }
   return null;
 }
@@ -170,12 +182,15 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
   const lockName = `sp-jwt-auth:refresh:${key}`;
   const channelName = `sp-jwt-auth:tabs:${key}`;
   const listeners = new Set<(m: TabMessage) => void>();
-  let last: { accessToken: string; expiresAt: number } | null = null;
+  let last: BroadcastToken | null = null;
   let closed = false;
 
   const deliver = (m: TabMessage | null): void => {
     if (closed || !m) return;
-    last = m.type === 'tokens' ? { accessToken: m.accessToken, expiresAt: m.expiresAt } : null;
+    if (m.type === 'tokens') {
+      last = { accessToken: m.accessToken, expiresAt: m.expiresAt };
+      if (m.csrf !== undefined) last.csrf = m.csrf;
+    } else last = null;
     for (const cb of [...listeners]) {
       try {
         cb(m);
@@ -288,4 +303,40 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
       events = null;
     },
   };
+}
+
+/** Result of `resolveSessionCrossTab`. */
+export interface SessionCrossTab {
+  crossTab: CrossTab | null;
+  /** `true` when the session created it (and so closes it on dispose). */
+  owned: boolean;
+  /**
+   * `true` when it has a real cross-tab identity: an explicit key (`true`,
+   * `{ key }`), an injected `{ instance }`, or a `webStorageStore` key. `false`
+   * for the store-scoped coordinator (memory or custom store) and for `false`.
+   */
+  named: boolean;
+  /** `true` for an injected `{ instance }` (the caller vouches for its transport). */
+  injected: boolean;
+}
+
+/**
+ * Picks the coordinator for a `userSession` (see `UserSessionOptions.crossTab`).
+ * ON by default only for a store with a `storageKey` (`webStorageStore`); a
+ * memory or custom store gets a store-scoped in-process lock (no channel, no
+ * globals), so per-request server sessions never share a lock or a token.
+ */
+export function resolveSessionCrossTab(
+  option: boolean | { key?: string; instance?: CrossTab } | undefined,
+  store: { readonly storageKey?: string } & object,
+): SessionCrossTab {
+  if (option === false) return { crossTab: null, owned: false, named: false, injected: false };
+  if (typeof option === 'object' && option.instance) return { crossTab: option.instance, owned: false, named: true, injected: true };
+  const explicitKey = typeof option === 'object' ? option.key : undefined;
+  if (option === true || explicitKey !== undefined || store.storageKey !== undefined) {
+    const key = explicitKey ?? store.storageKey ?? 'default';
+    // The storage-event fallback only makes sense for a web-storage key.
+    return { crossTab: createCrossTab(key, { storageKey: store.storageKey ?? null }), owned: true, named: true, injected: false };
+  }
+  return { crossTab: storeScopedCrossTab(store), owned: true, named: false, injected: false };
 }

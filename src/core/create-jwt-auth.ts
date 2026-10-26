@@ -1,7 +1,7 @@
 import { decodeClaims } from './claims';
 import type { Claims } from './claims';
 import { SpAuthError, isSpAuthError } from './errors';
-import { createHttp } from './http';
+import { PACKAGE_REVOKE_PATH, createHttp } from './http';
 import { ANONYMOUS_STATE, authenticatedState, createState } from './state';
 import { ensureDeviceId } from './stores';
 import type { Tokens } from './stores';
@@ -45,8 +45,7 @@ export const DEFAULT_ENDPOINTS = {
   jwks: '/.well-known/sp-jwt-auth/jwks.json',
 } as const satisfies Partial<Endpoints>;
 
-/** Package route used by `logout()` when no host `endpoints.logout` is configured. */
-export const PACKAGE_REVOKE_PATH = '/auth/token/revoke';
+export { PACKAGE_REVOKE_PATH } from './http';
 
 /** Default second-factor body: `{ '2fa_token', otp }` or `{ challenge_id, code }`. */
 export function defaultSecondFactorBody(c: Challenge, code: string): Record<string, unknown> {
@@ -153,10 +152,10 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     return readyPromise;
   };
 
-  const acceptTokens = async (rawBody: unknown): Promise<void> => {
+  const acceptTokens = async (rawBody: unknown, response?: Response): Promise<void> => {
     if (!runtime.acceptTokens) throw notConfigured(`acceptTokens for mode '${o.mode.kind}'`, 'core');
     await ready();
-    await runtime.acceptTokens(rawBody);
+    await runtime.acceptTokens(rawBody, response);
   };
 
   const clearSession = async (): Promise<void> => {
@@ -194,7 +193,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     async login(credentials) {
       const path = endpoint('login', 'login');
       await ready();
-      const { body } = await http<unknown>({
+      const { body, response } = await http<unknown>({
         method: 'POST',
         endpoint: path,
         body: credentials,
@@ -208,7 +207,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         const result: LoginResult = { status: 'second_factor_required', challenge };
         return result;
       }
-      await acceptTokens(body);
+      await acceptTokens(body, response);
       emit({ type: 'login' });
       return { status: 'authenticated' };
     },
@@ -217,7 +216,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
       const path = endpoint('secondFactor', 'secondFactor');
       await ready();
       const build = o.secondFactorBody ?? defaultSecondFactorBody;
-      const { body } = await http<unknown>({
+      const { body, response } = await http<unknown>({
         method: 'POST',
         endpoint: path,
         body: build(c, code),
@@ -225,7 +224,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         credentials: runtime.credentials,
         module: 'secondFactor',
       });
-      await acceptTokens(body);
+      await acceptTokens(body, response);
       emit({ type: 'login', secondFactor: true });
     },
 
@@ -279,6 +278,11 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
 
     ready,
 
+    async restore() {
+      await ready();
+      await runtime.restore?.();
+    },
+
     getState() {
       void ready();
       return state.get();
@@ -295,6 +299,8 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
       const get = async (headers: Record<string, string>): Promise<unknown> =>
         (await http<unknown>({ method: 'GET', endpoint: path, headers, credentials: runtime.credentials, module: 'whoami' })).body;
       let headers = await bearerHeaders();
+      // The subject the request is sent for: a login as someone else meanwhile must not get this user.
+      let subject = state.get().claims?.sub;
       let body: unknown;
       try {
         body = await get(headers);
@@ -302,11 +308,12 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         if (!(isSpAuthError(e) && e.status === 401) || !(await runtime.handleUnauthorized({ headers }))) throw e;
         // Retried once with the refreshed token; a second 401 is the caller's.
         headers = await bearerHeaders();
+        subject = state.get().claims?.sub;
         body = await get(headers);
       }
       const user = unwrap(unwrapMode, body);
       const current = state.get();
-      if (current.status === 'authenticated') state.set({ ...current, user });
+      if (current.status === 'authenticated' && current.claims?.sub === subject) state.set({ ...current, user });
       return user;
     },
 
@@ -320,18 +327,29 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
           ? await runtime.switchCompanyBody(companyId)
           : { company_id: companyId };
         const stored = runtime.peekAccessToken ? await runtime.peekAccessToken() : null;
-        const { body: raw } = await http<unknown>({
+        const headers: Record<string, string> = runtime.tokenRequestHeaders ? await runtime.tokenRequestHeaders() : {};
+        if (stored) headers.Authorization = `Bearer ${stored}`;
+        const { body: raw, response } = await http<unknown>({
           method: 'POST',
           endpoint: path,
           body,
           device: true,
-          headers: stored ? { Authorization: `Bearer ${stored}` } : undefined,
+          headers,
           credentials: runtime.credentials,
           module: 'switchCompany',
         });
         // Validates the pair before anything is stored: an invalid response keeps the current tokens.
-        ctx.extractPair(raw, 'switchCompany');
-        await acceptTokens(raw);
+        // No `body` on the error when the transport is the cookie: a `both`-mode body may carry a refresh token.
+        if (!findTokenPair(unwrap(unwrapMode, raw))) {
+          throw new SpAuthError({
+            status: 0,
+            code: 'unknown',
+            message: 'Response did not contain a token pair',
+            module: 'switchCompany',
+            body: runtime.credentials === 'include' ? null : raw,
+          });
+        }
+        await acceptTokens(raw, response);
         const store = runtime.store;
         if (store) {
           const t = await store.get();

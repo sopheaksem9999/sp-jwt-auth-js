@@ -152,7 +152,7 @@ export interface ModeContext {
 export interface ModeRuntime {
   /** Store used for device id and tokens, if the mode persists anything. */
   readonly store?: TokenStore | null;
-  /** `credentials` applied to login, second-factor and logout calls (cookie transport). */
+  /** `credentials` applied to login, second-factor, logout, whoami and company-switch calls (cookie transport). */
   readonly credentials?: 'include';
   /** Current access token (refreshed first when due), or `null`. Aborting `signal` stops this wait only. */
   getAccessToken(o?: { signal?: AbortSignal }): Promise<string | null>;
@@ -168,8 +168,11 @@ export interface ModeRuntime {
   handleUnauthorized(failed?: UnauthorizedContext): Promise<boolean>;
   /** Reads persisted state once and resolves `unknown` to `authenticated`/`anonymous`. */
   hydrate?(): Promise<void>;
-  /** Unwraps a raw body, stores the pair and updates state. */
-  acceptTokens?(rawBody: unknown): Promise<void>;
+  /**
+   * Unwraps a raw body, stores the pair and updates state. `response` is the
+   * token response itself (cookie transport reads its `X-SP-CSRF` header).
+   */
+  acceptTokens?(rawBody: unknown, response?: Response): Promise<void>;
   /** Clears tokens (keeping `deviceId`) and sets state `anonymous`; no network. */
   clearSession?(): Promise<void>;
   /** Single-flight refresh; rejects `SpAuthError('session_ended')` when the session is over. */
@@ -192,7 +195,12 @@ export interface ModeRuntime {
    * facade sends `{ company_id }` only.
    */
   switchCompanyBody?(companyId: string | number): Promise<Record<string, unknown>>;
-  /** Restores a session from the server (Task 20, cookie transport). */
+  /**
+   * Extra headers for facade calls that rotate tokens through the refresh
+   * cookie (company switch): the cookie transport's `X-SP-CSRF`. Without it, none.
+   */
+  tokenRequestHeaders?(): Promise<Record<string, string>>;
+  /** Restores a session from the server on page load (cookie transport). Without it `JwtAuth.restore()` is `ready()`. */
   restore?(): Promise<void>;
   /** Releases listeners and channels (e.g. the cross-tab subscription). */
   dispose?(): void;
@@ -239,8 +247,22 @@ export interface JwtAuth {
   handleUnauthorized(failed?: UnauthorizedContext): Promise<boolean>;
   /** Refreshes now (single flight); throws `not_configured` when the mode cannot refresh, `session_ended` when the session is over. */
   refresh(): Promise<void>;
-  /** Resolves once persisted state has been read (state leaves `unknown`). */
+  /**
+   * Resolves once persisted state has been read. Body transport: the state has
+   * left `unknown`. Cookie transport: the state stays `unknown` until `restore()`.
+   */
   ready(): Promise<void>;
+  /**
+   * Page-load restore. Cookie transport: the access token lives in memory, so
+   * this calls refresh once (the httpOnly cookie authenticates it):
+   * - success: `authenticated`; already holding a token: no request;
+   * - refresh 401 ("not logged in") or no CSRF value at all: `anonymous`, no
+   *   error and no `session_ended` (no request in the no-CSRF case);
+   * - 403: rejects `SpAuthError('csrf_failed')`, state unchanged (a setup error);
+   * - network error, timeout, 5xx: rejects, state unchanged (call it again).
+   * Other modes: same as `ready()`.
+   */
+  restore(): Promise<void>;
   /** Stable state snapshot. */
   getState(): AuthState;
   /** Registers a change listener; returns the unsubscribe function. */
@@ -251,19 +273,24 @@ export interface JwtAuth {
   http<T>(o: HttpRequest): Promise<HttpResult<T>>;
   /** Module surface: endpoint path; throws `SpAuthError('not_configured', module)` when unset. */
   endpoint(name: keyof Endpoints, module: string): string;
-  /** Module surface: unwrap → pair → store → state. */
-  acceptTokens(rawBody: unknown): Promise<void>;
+  /**
+   * Module surface: unwrap → pair → store → state. Pass the token `response`
+   * too, so the cookie transport can read its CSRF header.
+   */
+  acceptTokens(rawBody: unknown, response?: Response): Promise<void>;
   /** Module surface: clears the session without a network call. */
   clearSession(): Promise<void>;
   /**
    * GETs `endpoints.whoami` with the bearer token (one retry after a 401 via
    * `handleUnauthorized`), unwraps it per `unwrap`, caches it as `getState().user`
+   * (only when the signed-in subject is still the one the request was sent for)
    * and returns it. Throws `not_configured` (module `core`) when `endpoints.whoami` is unset.
    */
   whoami(): Promise<unknown>;
   /**
    * POSTs `{ company_id, refresh_token }` to `endpoints.switchCompany` (SaaS
-   * `impersonate_in`) and stores the returned pair; `getState().companyId`
+   * `impersonate_in`; the cookie transport sends `{ company_id }` with the
+   * cookie and `X-SP-CSRF` instead) and stores the returned pair; `getState().companyId`
    * follows the new token and `lastCompanyId` is persisted. Runs under the
    * refresh lock, so it never races a refresh for the same refresh token. A
    * response without a valid pair throws `SpAuthError('unknown')` and keeps the
