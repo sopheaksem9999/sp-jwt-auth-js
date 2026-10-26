@@ -41,7 +41,11 @@ async function flush(): Promise<void> {
 
 /** Spies standing in for `navigator.locks` and `BroadcastChannel`. */
 function stubGlobals(): { locks: { request: ReturnType<typeof vi.fn> }; constructed: string[]; closed: number } {
-  const out = { locks: { request: vi.fn((_n: string, cb: () => Promise<unknown>) => cb()) }, constructed: [] as string[], closed: 0 };
+  const out = {
+    locks: { request: vi.fn((_n: string, a: unknown, b?: unknown) => ((typeof a === 'function' ? a : b) as LockCb)({})) },
+    constructed: [] as string[],
+    closed: 0,
+  };
   vi.stubGlobal('navigator', { locks: out.locks });
   vi.stubGlobal(
     'BroadcastChannel',
@@ -106,20 +110,32 @@ class FakeChannel {
   }
 }
 
-/** Exclusive fake lock manager (one holder per name, FIFO), recording every request. */
-function fakeLocks(): { request(name: string, cb: () => Promise<unknown>): Promise<unknown>; log: string[] } {
+type LockCb = (lock: unknown) => Promise<unknown>;
+
+/**
+ * Exclusive fake lock manager (one holder per name, FIFO), recording every request
+ * (`name?` for an `ifAvailable` probe). Like `navigator.locks`, a probe gets `null`
+ * while the lock is held or queued for.
+ */
+function fakeLocks(): { request(name: string, a: LockCb | { ifAvailable?: boolean }, b?: LockCb): Promise<unknown>; log: string[] } {
   const tails = new Map<string, Promise<unknown>>();
+  const busy = new Map<string, number>();
   const log: string[] = [];
   return {
     log,
-    request(name, cb) {
-      log.push(name);
-      const prev = tails.get(name) ?? Promise.resolve();
-      const run = prev.then(() => cb());
-      tails.set(
-        name,
-        run.catch(() => undefined),
+    request(name, a, b) {
+      const cb = (typeof a === 'function' ? a : b)!;
+      const probe = typeof a === 'object' && a.ifAvailable === true;
+      log.push(probe ? `${name}?` : name);
+      if (probe && (busy.get(name) ?? 0) > 0) return Promise.resolve().then(() => cb(null));
+      busy.set(name, (busy.get(name) ?? 0) + 1);
+      const run = (tails.get(name) ?? Promise.resolve()).then(() => cb({ name }));
+      const tail = run.then(
+        () => undefined,
+        () => undefined,
       );
+      void tail.then(() => busy.set(name, (busy.get(name) ?? 1) - 1));
+      tails.set(name, tail);
       return run;
     },
   };
@@ -180,7 +196,7 @@ describe('two instances sharing a store (two tabs)', () => {
     expect(ta).toBe(access2);
     expect(tb).toBe(access2);
     expect(calls).toHaveLength(1);
-    expect(locks.log).toEqual(['sp-jwt-auth:refresh:k', 'sp-jwt-auth:refresh:k']);
+    expect(locks.log).toEqual(['sp-jwt-auth:refresh:k?', 'sp-jwt-auth:refresh:k?', 'sp-jwt-auth:refresh:k']);
     expect((await store.get())?.refreshToken).toBe(RT2);
     expect(a.events).toEqual([{ type: 'refresh' }]);
     expect(b.events).toEqual([{ type: 'refresh', adopted: true }]);
@@ -275,7 +291,7 @@ describe('two instances sharing a store (two tabs)', () => {
     });
     expect(g.constructed).toEqual([]);
     await on.refresh();
-    expect(g.locks.request).toHaveBeenCalledWith('sp-jwt-auth:refresh:default', expect.any(Function));
+    expect(g.locks.request).toHaveBeenCalledWith('sp-jwt-auth:refresh:default', { ifAvailable: true }, expect.any(Function));
     expect(g.constructed).toEqual(['sp-jwt-auth:tabs:default']);
 
     // webStorageStore: default ON, named after its key; `{ key }` overrides.
@@ -444,7 +460,91 @@ describe('createCrossTab', () => {
     gate.resolve();
     expect(await Promise.all([first, second])).toEqual([1, 2]);
     expect(order).toEqual(['a:start', 'a:end', 'b:start']);
-    expect(locks.log).toEqual(['sp-jwt-auth:refresh:k', 'sp-jwt-auth:refresh:k']);
+    expect(locks.log).toEqual(['sp-jwt-auth:refresh:k?', 'sp-jwt-auth:refresh:k?', 'sp-jwt-auth:refresh:k']);
+  });
+
+  it('withLock reports contention: a free lock is uncontended, one taken while held is contended', async () => {
+    const locks = fakeLocks();
+    const a = createCrossTab('k', { locks, channel: null, events: null });
+    const b = createCrossTab('k', { locks, channel: null, events: null });
+    opened.push(a, b);
+    const gate = deferred<void>();
+    const grants: unknown[] = [];
+    const first = a.withLock(async (g) => {
+      grants.push(['a', g]);
+      await gate.promise;
+    });
+    await flush();
+    const second = b.withLock(async (g) => {
+      grants.push(['b', g]);
+    });
+    await flush();
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(grants).toEqual([
+      ['a', { contended: false }],
+      ['b', { contended: true }],
+    ]);
+    expect(await a.withLock(async (g) => g)).toEqual({ contended: false });
+  });
+
+  it('a lock manager without the ifAvailable form still serialises (reported uncontended)', async () => {
+    const tails = new Map<string, Promise<unknown>>();
+    const plain = {
+      request(name: string, cb: () => Promise<unknown>): Promise<unknown> {
+        const run = (tails.get(name) ?? Promise.resolve()).then(() => cb());
+        tails.set(
+          name,
+          run.catch(() => undefined),
+        );
+        return run;
+      },
+    };
+    const ct = createCrossTab('plain', { locks: plain, channel: null, events: null });
+    opened.push(ct);
+    const gate = deferred<void>();
+    const order: unknown[] = [];
+    const first = ct.withLock(async (g) => {
+      order.push(['a', g]);
+      await gate.promise;
+    });
+    const second = ct.withLock(async (g) => {
+      order.push(['b', g]);
+    });
+    await flush();
+    expect(order).toEqual([['a', { contended: false }]]);
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      ['a', { contended: false }],
+      ['b', { contended: false }],
+    ]);
+  });
+
+  it('the in-process mutex and the store-scoped lock report contention too', async () => {
+    for (const [a, b] of [
+      [createCrossTab('mutex-grant', { locks: null, channel: null, events: null }), createCrossTab('mutex-grant', { locks: null, channel: null, events: null })],
+      (() => {
+        const scope = {};
+        return [storeScopedCrossTab(scope), storeScopedCrossTab(scope)];
+      })(),
+    ] as [CrossTab, CrossTab][]) {
+      const gate = deferred<void>();
+      const grants: unknown[] = [];
+      const first = a.withLock(async (g) => {
+        grants.push(g);
+        await gate.promise;
+      });
+      const second = b.withLock(async (g) => {
+        grants.push(g);
+      });
+      await flush();
+      gate.resolve();
+      await Promise.all([first, second]);
+      expect(grants).toEqual([{ contended: false }, { contended: true }]);
+      a.close();
+      b.close();
+    }
   });
 
   it('a lock-acquire failure degrades to the in-process mutex instead of failing', async () => {

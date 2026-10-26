@@ -59,9 +59,10 @@ function notConfigured(what: string, module: string): SpAuthError {
 /**
  * Creates the auth client. State starts `unknown` and is resolved lazily from
  * the mode's storage (first call to `ready()`, `getState()`, `subscribe()` or
- * any session method).
+ * any session method). `endpoints` may be omitted (`{}`: package routes only).
  */
-export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
+export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
+  const o: JwtAuthOptions & { endpoints: Endpoints } = { ...options, endpoints: options.endpoints ?? {} };
   const unwrapMode = o.unwrap ?? 'raw';
   const companyClaim = o.companyClaim ?? 'company_id';
   const state = createState();

@@ -46,6 +46,17 @@ export interface UserSessionOptions {
    * - `false`: no lock and no broadcast beyond the per-instance single flight.
    */
   crossTab?: boolean | { key?: string; instance?: CrossTab };
+  /**
+   * Cookie transport only, in a browser tab with cross-tab coordination: when a
+   * refresh had to WAIT for the cross-tab lock (another tab held it) and that
+   * tab's new access token has not arrived yet, wait up to this many ms for its
+   * broadcast before refreshing again. `BroadcastChannel` delivery and lock
+   * grants are not ordered, so without it the waiting tab can rotate a second
+   * time. Ends as soon as a message arrives; an uncontended refresh never waits;
+   * the lock is held at most this much longer. Default `100`; `0` turns it off.
+   * Ignored by the body transport (its shared store is authoritative) and on servers.
+   */
+  broadcastGraceMs?: number;
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {

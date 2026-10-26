@@ -93,8 +93,12 @@ export interface UnauthorizedContext {
 export interface JwtAuthOptions {
   /** Origin plus host prefix, e.g. `https://api.example.com/api/v2`. */
   baseUrl: string;
-  /** Host routes (§4.4); package routes are the defaults. */
-  endpoints: Endpoints;
+  /**
+   * Host routes (§4.4); package routes are the defaults. Optional: omitted means
+   * `{}` (refresh then uses the package `/auth/token/refresh`; a host-only route
+   * such as `login` or `whoami` throws `not_configured` when used).
+   */
+  endpoints?: Endpoints;
   /** How host responses are unwrapped; default `'raw'`. */
   unwrap?: Unwrap;
   /** Exactly one auth mode, e.g. `userSession({ storage })`. */
@@ -122,8 +126,8 @@ export interface JwtAuthOptions {
 
 /** Shared services handed to a mode when `createJwtAuth` instantiates it. */
 export interface ModeContext {
-  /** The options passed to `createJwtAuth`. */
-  readonly options: Readonly<JwtAuthOptions>;
+  /** The options passed to `createJwtAuth`, with `endpoints` always set (`{}` when omitted). */
+  readonly options: Readonly<JwtAuthOptions & { endpoints: Endpoints }>;
   /** Request helper (same as `JwtAuth.http`). */
   http<T>(req: HttpRequest): Promise<HttpResult<T>>;
   /** Endpoint lookup (same as `JwtAuth.endpoint`). */

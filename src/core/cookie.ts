@@ -1,6 +1,6 @@
 import { decodeClaims } from './claims';
 import { resolveSessionCrossTab } from './crosstab';
-import type { BroadcastToken, TabMessage } from './crosstab';
+import type { BroadcastToken, LockGrant, TabMessage } from './crosstab';
 import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import { PACKAGE_REVOKE_PATH, bearerFrom } from './http';
 import { createRefresher, isSessionEnded, sessionEndedError, waitFor } from './refresh';
@@ -40,6 +40,15 @@ export function hasDocument(): boolean {
   } catch {
     return false;
   }
+}
+
+/** Default `broadcastGraceMs`. */
+const DEFAULT_BROADCAST_GRACE_MS = 100;
+
+/** `broadcastGraceMs` as used: the default when unset or not a finite number, `0` (off) when negative. */
+function graceOf(v: number | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_BROADCAST_GRACE_MS;
+  return Math.max(0, v);
 }
 
 /** `true` when tabs can talk: `BroadcastChannel`, or (for a web-storage key) the `storage` event. */
@@ -125,7 +134,12 @@ function hasSecrets(t: Tokens | null): boolean {
  * - **Refresh.** No body. Single flight per instance, then the cross-tab lock.
  *   Inside the lock a token another tab already broadcast (or delivered while
  *   waiting) is used when still outside the refresh-ahead window, with no
- *   request. 401 while signed in: CSRF cleared (`deviceId` kept), `anonymous`,
+ *   request. Broadcast delivery and lock grants are not ordered relative to
+ *   each other, so when the lock was CONTENDED (another tab held it) and no
+ *   fresh token has arrived yet, it waits up to `broadcastGraceMs` (default
+ *   100, `0` off) for one, ending at the first message; the lock is held at
+ *   most that much longer. Tab context only; an uncontended grant never waits.
+ *   401 while signed in: CSRF cleared (`deviceId` kept), `anonymous`,
  *   `session_ended`; unless another tab broadcast a newer token meanwhile, which
  *   is adopted with `reuse_suspected`. 403: `SpAuthError('csrf_failed')`, the
  *   session and state are kept. Network, timeout, 5xx: kept, rethrown.
@@ -146,6 +160,7 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
   const csrfOpts = options.csrf === false ? {} : (options.csrf ?? {});
   const headerName = csrfOpts.header ?? 'X-SP-CSRF';
   const cookieName = csrfOpts.cookie ?? 'sp_csrf';
+  const graceMs = graceOf(options.broadcastGraceMs);
 
   return {
     kind: 'userSession',
@@ -160,6 +175,7 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
       let seenHeader = false;
       // CSRF value captured by the last clear, for the revoke call that follows it.
       let csrfAtClear: string | null = null;
+      let disposed = false;
 
       const ahead = (): number => ctx.options.refreshAheadSeconds ?? 60;
       const freshEnough = (exp: number | undefined): boolean => exp === undefined || exp - ctx.now() >= ahead();
@@ -314,20 +330,63 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
         });
       };
 
-      /** One cookie refresh, run holding the in-process queue and the cross-tab lock. */
-      const rotate = async (startedWith: string | null, clearsAtStart: number): Promise<void> => {
-        // Another tab's token arrived while we waited (delivered, or only recorded): use it, no request.
+      /** Uses another tab's token that arrived while we waited (delivered, or only recorded); `true` when adopted. */
+      const adoptedFromTab = async (startedWith: string | null): Promise<boolean> => {
         if (access !== null && access !== startedWith && freshEnough(expiresAt)) {
           ctx.emit({ type: 'refresh', adopted: true });
-          return;
+          return true;
         }
         if (tabContext()) {
           const b = crossTab?.lastBroadcast();
           if (b && b.accessToken !== startedWith && b.expiresAt - ctx.now() >= ahead()) {
             await adoptBroadcast(b);
             ctx.emit({ type: 'refresh', adopted: true });
+            return true;
+          }
+        }
+        return false;
+      };
+
+      // Pending broadcast waits, settled early by dispose().
+      const graces = new Set<() => void>();
+
+      /**
+       * Waits up to `graceMs` for the next message from another tab (event-driven: it ends at the
+       * first message, the timer is only the bound). Always settles; never leaves a timer or listener.
+       */
+      const awaitBroadcast = (): Promise<void> =>
+        new Promise<void>((resolve) => {
+          if (disposed || !crossTab) {
+            resolve();
             return;
           }
+          // Filled in below; `done` may run before either is set (an injected CrossTab delivering synchronously).
+          const pending: { timer?: ReturnType<typeof setTimeout>; off?: () => void } = {};
+          const done = (): void => {
+            if (!graces.delete(done)) return;
+            if (pending.timer !== undefined) clearTimeout(pending.timer);
+            pending.off?.();
+            resolve();
+          };
+          graces.add(done);
+          const off = crossTab.onMessage(done);
+          if (!graces.has(done)) {
+            off(); // already settled during subscription
+            return;
+          }
+          pending.off = off;
+          pending.timer = setTimeout(done, graceMs);
+        });
+
+      /** One cookie refresh, run holding the in-process queue and the cross-tab lock. */
+      const rotate = async (startedWith: string | null, clearsAtStart: number, grant?: LockGrant): Promise<void> => {
+        if (await adoptedFromTab(startedWith)) return;
+        // Contended grant: the tab that held the lock may have rotated, and its broadcast can
+        // arrive after our grant. Wait briefly for it instead of rotating a second time.
+        if (grant?.contended === true && graceMs > 0 && tabContext()) {
+          await awaitBroadcast();
+          if (await adoptedFromTab(startedWith)) return;
+          if (clears !== clearsAtStart) throw sessionEndedError(0); // logged out meanwhile: nothing to refresh
         }
 
         // Read inside the lock: a tab that just rotated has already stored the new value.
@@ -418,7 +477,7 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           exclusive(() => {
             const startedWith = access;
             const clearsAtStart = clears;
-            const run = (): Promise<void> => rotate(startedWith, clearsAtStart);
+            const run = (grant?: LockGrant): Promise<void> => rotate(startedWith, clearsAtStart, grant);
             return crossTab ? crossTab.withLock(run) : run();
           }),
       });
@@ -443,7 +502,6 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
       };
 
       let unsubscribe: (() => void) | null = null;
-      let disposed = false;
       // Subscribed on first use and only in a real tab: a server never opens a channel for this.
       const listen = (): void => {
         if (disposed || unsubscribe || !crossTab || !tabContext()) return;
@@ -581,6 +639,7 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
         },
         dispose() {
           disposed = true;
+          for (const done of [...graces]) done(); // a pending broadcast wait ends now: no timer survives
           unsubscribe?.();
           unsubscribe = null;
           if (owned) crossTab?.close();

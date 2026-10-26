@@ -15,10 +15,23 @@ export interface BroadcastToken {
   csrf?: string;
 }
 
+/**
+ * How the refresh lock was obtained, passed to the `withLock` callback.
+ * `contended`: another holder had the lock when it was requested, so this
+ * caller waited for it (that holder may just have rotated and broadcast). A
+ * caller-supplied `CrossTab` may omit the argument; treat that as uncontended.
+ */
+export interface LockGrant {
+  contended: boolean;
+}
+
 /** Cross-tab coordination for one storage key. */
 export interface CrossTab {
-  /** Runs `fn` holding the refresh lock `sp-jwt-auth:refresh:<key>` (Web Locks, else an in-process mutex per key). */
-  withLock<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Runs `fn` holding the refresh lock `sp-jwt-auth:refresh:<key>` (Web Locks, else an in-process mutex per key).
+   * `fn` receives a `LockGrant` saying whether the lock was contended.
+   */
+  withLock<T>(fn: (grant?: LockGrant) => Promise<T>): Promise<T>;
   /** Tells other tabs (best effort; a no-op without `BroadcastChannel`). Only the documented fields are sent. */
   broadcast(m: TabMessage): void;
   /** Registers a listener for messages from other tabs; returns the unsubscribe function. Listener errors are swallowed. */
@@ -29,10 +42,22 @@ export interface CrossTab {
   close(): void;
 }
 
-/** The part of the Web Locks `LockManager` that is used. */
+/**
+ * The part of the Web Locks `LockManager` that is used: `request(name, cb)`.
+ * When the implementation also supports `request(name, { ifAvailable: true }, cb)`
+ * (`cb` gets `null` while the lock is held), as `navigator.locks` does, that is
+ * used first to tell a contended grant from a free one (see `LockGrant`). One
+ * without the options form still works: the probe fails before `cb` runs and the
+ * plain form is used, reported as uncontended.
+ */
 export interface LockManagerLike {
   request(name: string, cb: () => Promise<unknown>): Promise<unknown>;
 }
+
+/** `LockManagerLike` with the `ifAvailable` form, as the probe calls it (an implementation may lack it). */
+type ProbingLocks = {
+  request(name: string, options: { ifAvailable: boolean }, cb: (lock: unknown) => Promise<unknown>): Promise<unknown>;
+};
 
 /** Test and advanced seams for `createCrossTab`. `undefined` means feature-detect; `null` means "not available". */
 export interface CrossTabDeps {
@@ -48,10 +73,11 @@ export interface CrossTabDeps {
 
 type ChainMap<K> = { get(k: K): Promise<unknown> | undefined; set(k: K, v: Promise<unknown>): unknown; delete(k: K): unknown };
 
-/** Promise-chain mutex: callers using the same `k` in `map` run one at a time. */
-function exclusive<K, T>(map: ChainMap<K>, k: K, fn: () => Promise<T>): Promise<T> {
-  const prev = map.get(k) ?? Promise.resolve();
-  const run = prev.then(() => fn());
+/** Promise-chain mutex: callers using the same `k` in `map` run one at a time (`contended` when one was queued or running). */
+function exclusive<K, T>(map: ChainMap<K>, k: K, fn: (grant: LockGrant) => Promise<T>): Promise<T> {
+  const held = map.get(k);
+  const contended = held !== undefined;
+  const run = (held ?? Promise.resolve()).then(() => fn({ contended }));
   const tail = run.then(
     () => undefined,
     () => undefined,
@@ -65,7 +91,7 @@ function exclusive<K, T>(map: ChainMap<K>, k: K, fn: () => Promise<T>): Promise<
 
 /** Named chains: shared by every `createCrossTab` with the same key in this process. */
 const named = new Map<string, Promise<unknown>>();
-const mutex = <T>(name: string, fn: () => Promise<T>): Promise<T> => exclusive(named, name, fn);
+const mutex = <T>(name: string, fn: (grant: LockGrant) => Promise<T>): Promise<T> => exclusive(named, name, fn);
 
 /** Chains scoped to one store object (no string key, so unrelated sessions never share a lock). */
 const scoped = new WeakMap<object, Promise<unknown>>();
@@ -87,6 +113,9 @@ export function storeScopedCrossTab(scope: object): CrossTab {
     close: () => undefined,
   };
 }
+
+/** Probe result meaning "the lock is held by someone else". */
+const HELD: unique symbol = Symbol('held');
 
 function detectLocks(): LockManagerLike | null {
   try {
@@ -169,6 +198,9 @@ function fromStorageEvent(e: Event, watched: string): TabMessage | null {
  * - Lock: Web Locks `sp-jwt-auth:refresh:<key>` when `navigator.locks` exists.
  *   Without it, or when acquiring fails, an in-process mutex shared by every
  *   instance with the same key. An error thrown by `fn` is never retried.
+ *   Web Locks are first asked with `ifAvailable`: a free lock is taken at once
+ *   (`{ contended: false }`); a held one is then queued for (`{ contended: true }`).
+ *   The mutex reports `contended` when another caller was queued or running.
  * - Messages: `BroadcastChannel('sp-jwt-auth:tabs:<key>')` when available,
  *   else the `storage` event on the watched web-storage key (where
  *   `addEventListener` exists), else nothing (edge/Node: `broadcast` is a no-op).
@@ -239,24 +271,42 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
   const locks = deps.locks === undefined ? detectLocks() : deps.locks;
 
   return {
-    withLock<T>(fn: () => Promise<T>): Promise<T> {
+    withLock<T>(fn: (grant: LockGrant) => Promise<T>): Promise<T> {
       if (!locks) return mutex(lockName, fn);
       let entered = false;
-      let req: Promise<unknown>;
-      try {
-        req = locks.request(lockName, () => {
-          entered = true;
-          return fn();
-        });
-      } catch {
+      const enter = (contended: boolean): Promise<T> => {
+        entered = true;
+        return fn({ contended });
+      };
+      // The lock could not be acquired at all: still serialise in-process.
+      const degrade = (e: unknown): Promise<T> => {
+        if (entered) throw e;
         return mutex(lockName, fn);
+      };
+      /** Waits in the queue: `contended` is `true` when the probe saw the lock held. */
+      const queued = (contended: boolean): Promise<T> => {
+        let req: Promise<unknown>;
+        try {
+          req = locks.request(lockName, () => enter(contended));
+        } catch (e) {
+          return degrade(e);
+        }
+        return Promise.resolve(req).then((v) => v as T, degrade);
+      };
+      // Probe first with `ifAvailable`: a free lock is taken at once (uncontended); a held one
+      // answers `null` and we queue (contended). An implementation without the options form
+      // fails the probe before entering, and is then asked the plain way.
+      let probe: Promise<unknown>;
+      try {
+        probe = (locks as unknown as ProbingLocks).request(lockName, { ifAvailable: true }, (lock: unknown) =>
+          lock === null ? Promise.resolve(HELD) : enter(false),
+        );
+      } catch {
+        return queued(false);
       }
-      return Promise.resolve(req).then(
-        (v) => v as T,
-        (e: unknown) => {
-          if (entered) throw e;
-          return mutex(lockName, fn); // the lock could not be acquired: still serialise in-process
-        },
+      return Promise.resolve(probe).then(
+        (v) => (v === HELD ? queued(true) : (v as T)),
+        (e: unknown) => (entered ? Promise.reject(e) : queued(false)),
       );
     },
 

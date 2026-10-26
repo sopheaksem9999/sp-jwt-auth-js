@@ -619,11 +619,24 @@ describe('cookie transport: switchCompany and whoami', () => {
   });
 });
 
-/** In-memory `BroadcastChannel` bus: delivers to the other channels of the same name on a microtask. */
+/**
+ * In-memory `BroadcastChannel` bus: delivers to the other channels of the same name on a microtask.
+ * With `held`, deliveries wait until `release()` (a message that arrives after a lock grant).
+ */
 class FakeBus {
   readonly open = new Set<FakeChannel>();
   readonly posted: unknown[] = [];
+  held = false;
+  private readonly pending: (() => void)[] = [];
   factory = (name: string): BroadcastChannel => new FakeChannel(this, name) as unknown as BroadcastChannel;
+  deliver(run: () => void): void {
+    if (this.held) this.pending.push(run);
+    else queueMicrotask(run);
+  }
+  release(): void {
+    this.held = false;
+    for (const run of this.pending.splice(0)) queueMicrotask(run);
+  }
 }
 
 class FakeChannel {
@@ -645,7 +658,7 @@ class FakeChannel {
     this.bus.posted.push(JSON.parse(wire));
     for (const c of this.bus.open) {
       if (c === this || c.name !== this.name) continue;
-      queueMicrotask(() => {
+      this.bus.deliver(() => {
         for (const l of [...c.listeners]) l({ data: JSON.parse(wire) });
       });
     }
@@ -655,15 +668,29 @@ class FakeChannel {
   }
 }
 
-function fakeLocks(): { request(name: string, cb: () => Promise<unknown>): Promise<unknown> } {
+type LockCb = (lock: unknown) => Promise<unknown>;
+
+/** Exclusive FIFO fake of `navigator.locks`, including `ifAvailable` (the probe gets `null` while the lock is busy). */
+function fakeLocks(): { request(name: string, a: LockCb | { ifAvailable?: boolean }, b?: LockCb): Promise<unknown>; granted: string[] } {
   const tails = new Map<string, Promise<unknown>>();
+  const busy = new Map<string, number>();
+  const granted: string[] = [];
   return {
-    request(name, cb) {
-      const run = (tails.get(name) ?? Promise.resolve()).then(() => cb());
-      tails.set(
-        name,
-        run.catch(() => undefined),
+    granted,
+    request(name, a, b) {
+      const cb = (typeof a === 'function' ? a : b)!;
+      if (typeof a === 'object' && a.ifAvailable === true && (busy.get(name) ?? 0) > 0) return Promise.resolve().then(() => cb(null));
+      busy.set(name, (busy.get(name) ?? 0) + 1);
+      const run = (tails.get(name) ?? Promise.resolve()).then(() => {
+        granted.push(name);
+        return cb({ name });
+      });
+      const tail = run.then(
+        () => undefined,
+        () => undefined,
       );
+      void tail.then(() => busy.set(name, (busy.get(name) ?? 1) - 1));
+      tails.set(name, tail);
       return run;
     },
   };
@@ -673,9 +700,15 @@ interface Tab extends Setup {
   crossTab: CrossTab;
 }
 
-function tab(bus: FakeBus, locks: ReturnType<typeof fakeLocks>, handler: Handler, store: TokenStore = memoryStore()): Tab {
+function tab(
+  bus: FakeBus,
+  locks: ReturnType<typeof fakeLocks> | null,
+  handler: Handler,
+  store: TokenStore = memoryStore(),
+  opts: UserSessionOptions = {},
+): Tab {
   const crossTab = createCrossTab('app', { channel: bus.factory, locks, storageKey: null });
-  const s = setup(handler, { storage: store, crossTab: { instance: crossTab } });
+  const s = setup(handler, { ...opts, storage: store, crossTab: { instance: crossTab } });
   return { ...s, crossTab };
 }
 
@@ -824,5 +857,220 @@ describe('cookie transport: tabs', () => {
     expect(raw).not.toContain(nearExpiry);
     expect(raw).not.toContain(fresh2);
     expect(JSON.parse(m.get('app_auth')!)).toEqual({ csrf: 'c2' });
+  });
+});
+
+describe('cookie transport: broadcast grace after a contended lock', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Two signed-in tabs (a logged in, b followed the broadcast) with a near-expiry token; counts refresh requests. */
+  async function twoTabs(opts: UserSessionOptions = {}, locks: ReturnType<typeof fakeLocks> | null = fakeLocks()) {
+    // (`locks: null`: createCrossTab's in-process mutex)
+    stubDocument('');
+    const bus = new FakeBus();
+    let refreshes = 0;
+    const handler: Handler = (c) => {
+      if (c.path === '/auth/login') return json(pairBody(nearExpiry), 200, { 'X-SP-CSRF': 'c1' });
+      refreshes++;
+      return json({ access_token: fresh2, expires_in: 900, token_type: 'Bearer' }, 200, { 'X-SP-CSRF': `c${refreshes + 1}` });
+    };
+    const a = tab(bus, locks, handler, memoryStore(), opts);
+    const b = tab(bus, locks, handler, memoryStore(), opts);
+    await b.auth.ready();
+    await a.auth.login({});
+    await flush();
+    expect(b.auth.getState().status).toBe('authenticated');
+    return { a, b, bus, locks, refreshes: () => refreshes };
+  }
+
+  /** `setTimeout` calls with the grace delay. */
+  function graceTimers(spy: { mock: { calls: unknown[][] } }, ms: number): number {
+    return spy.mock.calls.filter((c) => c[1] === ms).length;
+  }
+
+  it('the broadcast arrives AFTER the contended grant but within the grace: adopted, one refresh in total', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs({ broadcastGraceMs: 250 });
+    t.bus.held = true; // a's broadcast is delayed past b's lock grant
+    const pa = t.a.auth.getAccessToken();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    expect(await pa).toBe(fresh2);
+    await flush();
+    expect(t.refreshes()).toBe(1);
+    expect(vi.getTimerCount()).toBe(1); // b waits in the grace, holding the lock
+    t.bus.release();
+    expect(await pb).toBe(fresh2);
+    expect(t.refreshes()).toBe(1);
+    expect(t.b.events).toContainEqual({ type: 'refresh', adopted: true });
+    expect((await t.b.store.get())?.csrf).toBe('c2');
+    expect(vi.getTimerCount()).toBe(0); // the grace timer was cleared, not left running
+  });
+
+  it('the broadcast never arrives: the waiting tab refreshes after the grace', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs({ broadcastGraceMs: 250 });
+    t.bus.held = true;
+    const pa = t.a.auth.getAccessToken();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    await pa;
+    await flush();
+    expect(t.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(t.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pb).toBe(fresh2);
+    expect(t.refreshes()).toBe(2);
+    expect(t.b.events).toContainEqual({ type: 'refresh' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('an uncontended grant does not wait: no grace timer, the refresh is sent at once', async () => {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    const t = await twoTabs({ broadcastGraceMs: 250 });
+    await expect(t.b.auth.getAccessToken()).resolves.toBe(fresh2);
+    expect(t.refreshes()).toBe(1);
+    expect(graceTimers(spy, 250)).toBe(0);
+  });
+
+  it('broadcastGraceMs: 0 turns the wait off (contended grant refreshes again at once)', async () => {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    const t = await twoTabs({ broadcastGraceMs: 0 });
+    t.bus.held = true;
+    const [ta, tb] = await Promise.all([t.a.auth.getAccessToken(), t.b.auth.getAccessToken()]);
+    expect(ta).toBe(fresh2);
+    expect(tb).toBe(fresh2);
+    expect(t.refreshes()).toBe(2); // the old ordering dependence, by choice
+    expect(graceTimers(spy, 0)).toBe(0);
+  });
+
+  it('the default grace is 100 ms', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs();
+    t.bus.held = true;
+    const pa = t.a.auth.getAccessToken();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    await pa;
+    await vi.advanceTimersByTimeAsync(99);
+    expect(t.refreshes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await pb;
+    expect(t.refreshes()).toBe(2);
+  });
+
+  it('dispose() ends a pending grace at once and leaves no timer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs({ broadcastGraceMs: 10_000 });
+    t.bus.held = true;
+    const pa = t.a.auth.getAccessToken();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    await pa;
+    await flush();
+    expect(vi.getTimerCount()).toBe(1);
+    t.b.auth.dispose?.();
+    expect(vi.getTimerCount()).toBe(0);
+    await pb; // settles without advancing the clock
+  });
+
+  it('a logout broadcast during the grace ends it: no refresh, anonymous', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs({ broadcastGraceMs: 10_000 });
+    // Another tab holds the lock (e.g. a company switch) and then logs out instead of rotating.
+    const other = createCrossTab('app', { channel: t.bus.factory, locks: t.locks, storageKey: null });
+    let releaseOther!: () => void;
+    const holding = other.withLock(() => new Promise<void>((r) => (releaseOther = r)));
+    await flush();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    releaseOther();
+    await holding;
+    await flush();
+    expect(vi.getTimerCount()).toBe(1); // b was granted the contended lock and waits
+    other.broadcast({ type: 'logout' });
+    await expect(pb).resolves.toBeNull();
+    expect(t.refreshes()).toBe(0);
+    expect(t.b.auth.getState().status).toBe('anonymous');
+    expect(vi.getTimerCount()).toBe(0);
+    other.close();
+  });
+
+  it('body transport: a contended grant never waits (its shared store is authoritative)', async () => {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    stubDocument('');
+    const bus = new FakeBus();
+    const locks = fakeLocks();
+    const store = memoryStore();
+    await store.set({ accessToken: nearExpiry, refreshToken: 'rt1', expiresAt: now() + 30 });
+    let refreshes = 0;
+    const { fetch } = fakeFetch(() => {
+      refreshes++;
+      return json({ access_token: fresh2, refresh_token: 'rt2', expires_in: 900, token_type: 'Bearer' });
+    });
+    const make = (): JwtAuth =>
+      createJwtAuth({
+        baseUrl: 'https://api.example.com',
+        mode: userSession({
+          storage: store,
+          broadcastGraceMs: 250,
+          crossTab: { instance: createCrossTab('body', { channel: bus.factory, locks, storageKey: null }) },
+        }),
+        fetch,
+      });
+    const a = make();
+    const b = make();
+    await Promise.all([a.ready(), b.ready()]);
+    const [ta, tb] = await Promise.all([a.getAccessToken(), b.getAccessToken()]);
+    expect(ta).toBe(fresh2);
+    expect(tb).toBe(fresh2);
+    expect(refreshes).toBe(1); // b re-read the store inside the lock
+    expect(locks.granted).toHaveLength(2); // both took the lock: b's grant was contended
+    expect(graceTimers(spy, 250)).toBe(0);
+  });
+
+  it('the in-process mutex (no Web Locks) reports contention too: same grace', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const t = await twoTabs({ broadcastGraceMs: 250 }, null);
+    t.bus.held = true;
+    const pa = t.a.auth.getAccessToken();
+    const pb = t.b.auth.getAccessToken();
+    await flush();
+    await pa;
+    await flush();
+    expect(vi.getTimerCount()).toBe(1);
+    t.bus.release();
+    expect(await pb).toBe(fresh2);
+    expect(t.refreshes()).toBe(1);
+  });
+
+  it('no tab context (no document): a contended grant never waits', async () => {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    const bus = new FakeBus();
+    const locks = fakeLocks();
+    let refreshes = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const handler: Handler = async () => {
+      refreshes++;
+      if (refreshes === 1) await gate;
+      return json({ access_token: fresh2, expires_in: 900, token_type: 'Bearer' }, 200, { 'X-SP-CSRF': 'c2' });
+    };
+    const a = tab(bus, locks, handler, memoryStore(), { broadcastGraceMs: 250 });
+    const b = tab(bus, locks, handler, memoryStore(), { broadcastGraceMs: 250 });
+    await a.store.set({ csrf: 'c1' });
+    await b.store.set({ csrf: 'c1' });
+    const pa = a.auth.restore();
+    await flush();
+    const pb = b.auth.restore(); // queued behind a: contended
+    await flush();
+    release();
+    await Promise.all([pa, pb]);
+    expect(refreshes).toBe(2);
+    expect(graceTimers(spy, 250)).toBe(0);
+    expect(bus.posted).toHaveLength(0);
   });
 });
