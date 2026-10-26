@@ -68,6 +68,22 @@ describe('mfa.resend', () => {
     expect(await mfa(f.auth).resend(c)).toEqual({ sent: 3 });
   });
 
+  it('a function unwrap that throws on an empty or null body gives unknown (module mfa)', async () => {
+    for (const body of ['', 'null']) {
+      const s = setup(() => new Response(body, { status: 200 }), { secondFactorResend: '/r' }, (b) => (b as { payload: unknown }).payload);
+      let err: unknown;
+      try {
+        await mfa(s.auth).resend({ kind: 'challenge_id', token: 'ch-1' });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(SpAuthError);
+      expect((err as SpAuthError).code).toBe('unknown');
+      expect((err as SpAuthError).module).toBe('mfa');
+      expect((err as SpAuthError).message).not.toContain('null');
+    }
+  });
+
   it('unset endpoints.secondFactorResend -> not_configured (module mfa), no request', async () => {
     const s = setup(() => ok(), {});
     let err: unknown;

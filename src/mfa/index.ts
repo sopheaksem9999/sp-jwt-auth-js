@@ -1,3 +1,4 @@
+import { SpAuthError } from '../core/errors';
 import type { Challenge, JwtAuth } from '../core/types';
 
 /** The `mfa(auth)` module surface. */
@@ -30,7 +31,11 @@ export function mfa(auth: JwtAuth): MfaModule {
         bearer: false,
         module: MODULE,
       });
-      return auth.unwrap(raw);
+      try {
+        return auth.unwrap(raw);
+      } catch (cause) {
+        throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response could not be unwrapped', module: MODULE, cause });
+      }
     },
   };
 }

@@ -72,7 +72,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * that value has no `otp_id`) the raw body and one `{ data }` level of it.
  */
 function toSent(auth: JwtAuth, raw: unknown): OtpSent | null {
-  const unwrapped = auth.unwrap(raw);
+  let unwrapped: unknown;
+  try {
+    unwrapped = auth.unwrap(raw);
+  } catch {
+    unwrapped = undefined; // a function-valued unwrap may throw on an unexpected body
+  }
   for (const v of [unwrapped, raw, isRecord(raw) ? raw.data : undefined]) {
     if (isRecord(v) && typeof v.otp_id === 'string' && typeof v.destination_masked === 'string' && typeof v.expires_in === 'number') {
       return { otp_id: v.otp_id, destination_masked: v.destination_masked, expires_in: v.expires_in };

@@ -152,6 +152,24 @@ describe('otp request / resend / resendByDestination', () => {
 });
 
 describe('otp unwrap handling', () => {
+  it('a throwing function unwrap on an empty or null 202 body gives unknown, not a TypeError', async () => {
+    const fn: Unwrap = (b) => (b as { payload: unknown }).payload;
+    for (const body of ['', 'null']) {
+      const s = setup(() => new Response(body, { status: 202 }), { unwrap: fn });
+      const o = otp(s.auth);
+      for (const p of [
+        o.request(req),
+        o.resend({ otp_id: 'o-1', destination: req.destination, channel: req.channel }),
+        o.resendByDestination(req),
+      ]) {
+        const e = await caught(p);
+        expect(e.code).toBe('unknown');
+        expect(e.module).toBe('otp');
+        expect(e.message).not.toContain('null');
+      }
+    }
+  });
+
   it('a custom unwrap function works for request, resend and resendByDestination', async () => {
     const s = setup(() => json({ payload: sent }, 202), {
       unwrap: (b) => (b as { payload: unknown }).payload,
