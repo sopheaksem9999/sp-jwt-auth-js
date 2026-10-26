@@ -1,13 +1,17 @@
-// Guard: dist/ must not import Node built-ins (`node:` specifiers), so the
-// package runs in browsers and edge runtimes. Catches static (`from "node:x"`),
-// side-effect (`import "node:x"`), dynamic (`import("node:x")`) and CJS
-// (`require("node:x")`) forms.
+// Guard: dist/ must not import Node built-ins, so the package runs in browsers and edge runtimes. Catches static
+// (`from "node:x"`), side-effect (`import "node:x"`), dynamic (`import("node:x")`) and CJS (`require("node:x")`)
+// forms, with the `node:` prefix or as a bare builtin (`from "fs"`, `require("path")`; list in module-markers.mjs).
+//
+// Module markers (MODULE_MARKERS_BY_MODULE) live in scripts/module-markers.mjs, shared with check-bundle.mjs;
+// a new module adds its markers there (see the steps at the top of that file), never here.
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MODULE_MARKERS, MODULE_MARKERS_BY_MODULE, NODE_IMPORT_RE } from './module-markers.mjs';
 
-const root = fileURLToPath(new URL('../dist', import.meta.url));
-const NODE_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']node:/;
+// CHECK_DIST_ROOT: point the guard at another directory (used only to demonstrate it fails on a planted file).
+const root = process.env.CHECK_DIST_ROOT ?? fileURLToPath(new URL('../dist', import.meta.url));
+const NODE_IMPORT = NODE_IMPORT_RE;
 const bad = [];
 
 function walk(dir) {
@@ -28,7 +32,7 @@ try {
   process.exit(1);
 }
 if (bad.length) {
-  console.error(`check-dist: node: imports found in dist:\n  ${bad.join('\n  ')}`);
+  console.error(`check-dist: Node built-in imports found in dist (node:x or a bare builtin):\n  ${bad.join('\n  ')}`);
   process.exit(1);
 }
 
@@ -51,6 +55,35 @@ for (const f of ['verify.js', 'verify.cjs']) {
 }
 if (joseProblems.length) {
   console.error(`check-dist: jose isolation:\n  ${joseProblems.join('\n  ')}`);
+  process.exit(1);
+}
+
+// The core import graph must hold no module code (importing only the main entry pulls in no module). Each marker
+// must really appear in its own module's dist file, so a marker the bundler never emits cannot pass vacuously.
+const vacuous = [];
+for (const [mod, markers] of Object.entries(MODULE_MARKERS_BY_MODULE)) {
+  for (const ext of ['js', 'cjs']) {
+    const text = readFileSync(join(root, `${mod}.${ext}`), 'utf8');
+    for (const m of markers) if (!text.includes(m)) vacuous.push(`dist/${mod}.${ext} lacks marker "${m}"`);
+  }
+}
+if (vacuous.length) {
+  console.error(`check-dist: vacuous module markers (not emitted in their own module file):\n  ${vacuous.join('\n  ')}`);
+  process.exit(1);
+}
+const seen = new Set();
+const leaks = [];
+function follow(file) {
+  if (seen.has(file)) return;
+  seen.add(file);
+  const text = readFileSync(file, 'utf8');
+  for (const m of MODULE_MARKERS) if (text.includes(m)) leaks.push(`${relative(root, file)} contains "${m}"`);
+  for (const m of text.matchAll(/(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'](\.[^"']+)["']/g)) follow(resolve(dirname(file), m[1]));
+}
+follow(join(root, 'index.js'));
+follow(join(root, 'index.cjs'));
+if (leaks.length) {
+  console.error(`check-dist: module code reachable from the main entry:\n  ${leaks.join('\n  ')}`);
   process.exit(1);
 }
 console.log('check-dist: ok');

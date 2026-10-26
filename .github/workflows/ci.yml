@@ -4,10 +4,17 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  # Spec §7 runtime matrix: Node 20 / 22 / 24, each with the full suite (node + edge vitest projects), the edge
+  # canary, and `pnpm check` (build, publint, attw, check-dist, check-modules, check-bundle, CJS + ESM smoke imports).
+  node:
+    name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: [20, 22, 24]
     steps:
@@ -20,5 +27,46 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
+      # Build first so the dist-based tests (CJS instanceof, independence probe) run instead of skipping.
+      - run: pnpm build
       - run: pnpm vitest run
+        env:
+          REQUIRE_DIST: '1'
+      - run: pnpm test:edge-canary
       - run: pnpm check
+
+  # Deno and Bun: the unit suite (vitest `node` project, its workers running on that runtime), then the built ESM
+  # entries imported by file URL with a small end-to-end flow on a fake fetch.
+  deno:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: pnpm test:deno
+      - run: pnpm smoke:deno
+
+  bun:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: pnpm test:bun
+      - run: pnpm smoke:bun
