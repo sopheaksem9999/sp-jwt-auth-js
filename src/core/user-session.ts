@@ -142,7 +142,16 @@ export function userSession(options: UserSessionOptions): AuthMode {
         });
       };
 
-      const refresher = createRefresher({ perform: performTokenRefresh({ ctx, store, clearSession, crossTab }) });
+      // Refreshes and refresh-token-consuming calls (company switch) take turns through this in-process queue,
+      // then the cross-tab lock, always in that order.
+      let queue: Promise<unknown> = Promise.resolve();
+      const exclusive = <T>(fn: () => Promise<T>): Promise<T> => {
+        const run = queue.then(fn, fn);
+        queue = run.catch(() => undefined);
+        return run;
+      };
+      const rotate = performTokenRefresh({ ctx, store, clearSession, crossTab });
+      const refresher = createRefresher({ perform: () => exclusive(rotate) });
       const refresh = (): Promise<void> => {
         listen();
         return refresher.refresh();
@@ -200,6 +209,14 @@ export function userSession(options: UserSessionOptions): AuthMode {
           }
         },
         refresh,
+        withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+          listen();
+          return exclusive(() => (crossTab ? crossTab.withLock(fn) : fn()));
+        },
+        async switchCompanyBody(companyId) {
+          const t = await safeGet(store);
+          return { company_id: companyId, refresh_token: t?.refreshToken };
+        },
         async hydrate() {
           listen();
           const t = await safeGet(store);

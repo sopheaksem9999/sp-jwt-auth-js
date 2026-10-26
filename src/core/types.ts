@@ -179,6 +179,19 @@ export interface ModeRuntime {
    * cleared the session; `accessToken` is the token captured before clearing.
    */
   logout?(o: { everywhere?: boolean; accessToken: string | null }): Promise<void>;
+  /**
+   * Runs `fn` exclusively with respect to refreshes (in-process and cross-tab),
+   * so a call that consumes the refresh token (company switch) cannot race one.
+   * Without it the facade runs `fn` directly.
+   */
+  withRefreshLock?<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Request body for the company-switch call. Body transport: `{ company_id,
+   * refresh_token }` with the stored refresh token (call it inside
+   * `withRefreshLock`); the cookie transport omits the token. Without it the
+   * facade sends `{ company_id }` only.
+   */
+  switchCompanyBody?(companyId: string | number): Promise<Record<string, unknown>>;
   /** Restores a session from the server (Task 20, cookie transport). */
   restore?(): Promise<void>;
   /** Releases listeners and channels (e.g. the cross-tab subscription). */
@@ -242,6 +255,27 @@ export interface JwtAuth {
   acceptTokens(rawBody: unknown): Promise<void>;
   /** Module surface: clears the session without a network call. */
   clearSession(): Promise<void>;
+  /**
+   * GETs `endpoints.whoami` with the bearer token (one retry after a 401 via
+   * `handleUnauthorized`), unwraps it per `unwrap`, caches it as `getState().user`
+   * and returns it. Throws `not_configured` (module `core`) when `endpoints.whoami` is unset.
+   */
+  whoami(): Promise<unknown>;
+  /**
+   * POSTs `{ company_id, refresh_token }` to `endpoints.switchCompany` (SaaS
+   * `impersonate_in`) and stores the returned pair; `getState().companyId`
+   * follows the new token and `lastCompanyId` is persisted. Runs under the
+   * refresh lock, so it never races a refresh for the same refresh token. A
+   * response without a valid pair throws `SpAuthError('unknown')` and keeps the
+   * existing tokens. Throws `not_configured` when `endpoints.switchCompany` is unset.
+   */
+  switchCompany(companyId: string | number): Promise<void>;
+  /** `true` when the access token's `scopes` claim holds `scope` or `*`. UI hint only: the server still decides. `false` when anonymous. */
+  hasScope(scope: string): boolean;
+  /** `true` when every scope is held (`*` holds all); `true` for `[]` while signed in, `false` when anonymous. UI hint only. */
+  hasAllScopes(scopes: readonly string[]): boolean;
+  /** `true` when at least one scope is held (`*` holds all); `false` for `[]` and when anonymous. UI hint only. */
+  hasAnyScope(scopes: readonly string[]): boolean;
   /**
    * Releases what the mode holds open (the cross-tab subscription and channel).
    * Call it when the client is discarded (e.g. a test, or an app unmount); the

@@ -178,6 +178,18 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     });
   };
 
+  /** Auth headers for a request: the (proactively refreshed) access token, or none. */
+  const bearerHeaders = async (): Promise<Record<string, string>> => {
+    const token = await runtime.getAccessToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const hasScopeIn = (held: readonly string[], scope: string): boolean => held.includes('*') || held.includes(scope);
+  const heldScopes = (): readonly string[] | null => {
+    void ready();
+    return state.get().claims?.scopes ?? null;
+  };
+
   return {
     async login(credentials) {
       const path = endpoint('login', 'login');
@@ -275,6 +287,74 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     subscribe(l) {
       void ready();
       return state.subscribe(l);
+    },
+
+    async whoami() {
+      const path = endpoint('whoami', 'core');
+      await ready();
+      const get = async (headers: Record<string, string>): Promise<unknown> =>
+        (await http<unknown>({ method: 'GET', endpoint: path, headers, credentials: runtime.credentials, module: 'whoami' })).body;
+      let headers = await bearerHeaders();
+      let body: unknown;
+      try {
+        body = await get(headers);
+      } catch (e) {
+        if (!(isSpAuthError(e) && e.status === 401) || !(await runtime.handleUnauthorized({ headers }))) throw e;
+        // Retried once with the refreshed token; a second 401 is the caller's.
+        headers = await bearerHeaders();
+        body = await get(headers);
+      }
+      const user = unwrap(unwrapMode, body);
+      const current = state.get();
+      if (current.status === 'authenticated') state.set({ ...current, user });
+      return user;
+    },
+
+    async switchCompany(companyId) {
+      const path = endpoint('switchCompany', 'core');
+      await ready();
+      // Proactive refresh first (it takes the lock itself); the call below must not refresh while holding it.
+      await runtime.getAccessToken();
+      const run = async (): Promise<void> => {
+        const body = runtime.switchCompanyBody
+          ? await runtime.switchCompanyBody(companyId)
+          : { company_id: companyId };
+        const stored = runtime.peekAccessToken ? await runtime.peekAccessToken() : null;
+        const { body: raw } = await http<unknown>({
+          method: 'POST',
+          endpoint: path,
+          body,
+          device: true,
+          headers: stored ? { Authorization: `Bearer ${stored}` } : undefined,
+          credentials: runtime.credentials,
+          module: 'switchCompany',
+        });
+        // Validates the pair before anything is stored: an invalid response keeps the current tokens.
+        ctx.extractPair(raw, 'switchCompany');
+        await acceptTokens(raw);
+        const store = runtime.store;
+        if (store) {
+          const t = await store.get();
+          if (t) await store.set({ ...t, lastCompanyId: String(companyId) });
+        }
+      };
+      if (runtime.withRefreshLock) await runtime.withRefreshLock(run);
+      else await run();
+    },
+
+    hasScope(scope) {
+      const held = heldScopes();
+      return held !== null && hasScopeIn(held, scope);
+    },
+
+    hasAllScopes(scopes) {
+      const held = heldScopes();
+      return held !== null && scopes.every((s) => hasScopeIn(held, s));
+    },
+
+    hasAnyScope(scopes) {
+      const held = heldScopes();
+      return held !== null && scopes.some((s) => hasScopeIn(held, s));
     },
 
     decodeClaims(t?: string): Claims | null {
