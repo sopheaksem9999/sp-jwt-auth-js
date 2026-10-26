@@ -116,7 +116,9 @@ function hasSecrets(t: Tokens | null): boolean {
  *   taken from its `X-SP-CSRF` header, else from `readCookie('sp_csrf')` (browser
  *   only), persisted in `storage` and broadcast to other tabs. It is echoed as
  *   the `X-SP-CSRF` request header on refresh, revoke and company switch.
- *   Names are the `csrf` option; `csrf: false` turns it off.
+ *   When one of those gets a 403 and the readable cookie (browser only) holds
+ *   a different value (another tab rotated it), that value is stored and the
+ *   request retried ONCE. Names are the `csrf` option; `csrf: false` turns it off.
  * - **Page load.** State stays `unknown` until `restore()`, which calls refresh
  *   once (see `JwtAuth.restore`). With no CSRF value at all it is `anonymous`
  *   without a request; a 401 is "not logged in" (no error, no events).
@@ -166,12 +168,30 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
       const tabContext = (): boolean =>
         crossTab !== null && named && hasDocument() && (injected || hasTabTransport(store.storageKey !== undefined));
 
-      /** CSRF value to send: the stored one, else (browser only) the readable cookie. */
-      const currentCsrf = async (): Promise<string | null> => {
-        if (!csrfEnabled) return null;
+      /** CSRF value to send (`stored`: it came from the store): the stored one, else (browser only) the readable cookie. */
+      const csrfToSend = async (): Promise<{ value: string | null; stored: boolean }> => {
+        if (!csrfEnabled) return { value: null, stored: false };
         const stored = (await safeGet(store))?.csrf;
-        if (stored) return stored;
-        return hasDocument() ? readCookie(cookieName) : null;
+        if (stored) return { value: stored, stored: true };
+        return { value: hasDocument() ? readCookie(cookieName) : null, stored: false };
+      };
+      const currentCsrf = async (): Promise<string | null> => (await csrfToSend()).value;
+
+      /**
+       * After a 403: the live readable cookie, when it differs from the value
+       * sent (another tab whose store and channel we do not share rotated it).
+       * Browser only; `persist` stores it. `null` means "do not retry".
+       */
+      const recoverCsrf = async (sent: string | null, persist: boolean): Promise<string | null> => {
+        if (!csrfEnabled || !hasDocument()) return null;
+        const live = readCookie(cookieName);
+        if (!live || live === sent) return null;
+        if (persist) {
+          await writeStore((t) => {
+            t.csrf = live;
+          });
+        }
+        return live;
       };
 
       /** CSRF value from a cookie-setting response: its header first, then (browser only) the readable cookie. */
@@ -269,14 +289,19 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
         ctx.emit({ type: 'refresh_failed', status: isSpAuthError(e) ? e.status : 0, code: isSpAuthError(e) ? e.code : 'unknown' });
       };
 
+      /**
+       * `hint`: the CORS advice, for when the client had no value to send, or never saw the
+       * header and had nothing stored (the cross-site `exposed_headers` setup error). Otherwise
+       * it is a plain mismatch of a value the client did have.
+       */
       const csrfFailed = (e: SpAuthError, hint: boolean): SpAuthError => {
-        let message = `Refresh was rejected with HTTP 403: the ${headerName} header was missing or did not match the ${cookieName} cookie (CSRF double-submit).`;
-        if (hint) {
-          message +=
-            ` No ${headerName} value was read from a token response. If the API is on another site, add '${headerName}'` +
-            ' to the CORS exposed_headers (config/cors.php, with supports_credentials) so the browser lets the client read it;' +
-            ' on a same-site subdomain set SP_JWT_REFRESH_COOKIE_DOMAIN or expose the header.';
-        }
+        const message = hint
+          ? `CSRF check failed (HTTP 403): no ${headerName} value was sent or read from a token response.` +
+            ` If the API is on another site, add '${headerName}' to the CORS exposed_headers (config/cors.php,` +
+            ' with supports_credentials) so the browser lets the client read it; on a same-site subdomain set' +
+            ' SP_JWT_REFRESH_COOKIE_DOMAIN or expose the header.'
+          : `CSRF check failed (HTTP 403): the stored ${headerName} value does not match the ${cookieName} cookie;` +
+            ' reload the page or sign in again.';
         return new SpAuthError({
           status: 403,
           code: 'csrf_failed',
@@ -306,32 +331,41 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
         }
 
         // Read inside the lock: a tab that just rotated has already stored the new value.
-        const csrf = await currentCsrf();
+        const { value: csrf, stored: csrfWasStored } = await csrfToSend();
         if (csrfEnabled && !csrf && startedWith === null) throw sessionEndedError(0); // nothing to refresh with
 
-        const headers: Record<string, string> = {};
-        if (csrf) headers[headerName] = csrf;
-        let raw: unknown;
-        let response: Response;
-        try {
+        const send = (value: string | null) =>
           // No body: the cookie is the refresh token (in cookie mode the backend ignores a body one).
-          ({ body: raw, response } = await ctx.http<unknown>({
+          ctx.http<unknown>({
             method: 'POST',
             endpoint: ctx.endpoint('refresh', 'refresh'),
-            headers,
+            headers: value ? { [headerName]: value } : {},
             device: true,
             credentials: 'include',
             module: 'refresh',
-          }));
+          });
+        let sent = csrf;
+        let raw: unknown;
+        let response: Response;
+        try {
+          try {
+            ({ body: raw, response } = await send(sent));
+          } catch (e) {
+            const live = isSpAuthError(e) && e.status === 403 ? await recoverCsrf(sent, true) : null;
+            if (live === null) throw e;
+            sent = live; // retried once; a second 403 is final
+            ({ body: raw, response } = await send(sent));
+          }
         } catch (e) {
           if (isSpAuthError(e) && e.status === 401) {
             if (clears !== clearsAtStart) throw sessionEndedError(401, e); // logged out meanwhile: nothing to clear
+            // A newer token arrived meanwhile (a login, or another tab's rotation): keep it, clear nothing.
+            if (access !== null && access !== startedWith) {
+              if (startedWith !== null) ctx.emit({ type: 'reuse_suspected', status: 401 });
+              return;
+            }
             if (tabContext()) {
               // Another tab rotated while our request was in flight (no shared lock): continue with its token.
-              if (access !== null && access !== startedWith && expiresAt !== undefined && expiresAt > ctx.now()) {
-                ctx.emit({ type: 'reuse_suspected', status: 401 });
-                return;
-              }
               const b = crossTab?.lastBroadcast();
               if (b && b.accessToken !== startedWith && b.expiresAt > ctx.now()) {
                 await adoptBroadcast(b);
@@ -341,16 +375,16 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
             }
             if (startedWith === null) {
               // Page-load restore (or a refresh with no session): "not logged in", quietly.
-              await clear({ broadcast: false, sentCsrf: csrf });
+              await clear({ broadcast: false, sentCsrf: sent });
               throw sessionEndedError(401, e);
             }
             fail(e);
-            await clear({ broadcast: true, sentCsrf: csrf });
+            await clear({ broadcast: true, sentCsrf: sent });
             ctx.emit({ type: 'session_ended' });
             throw sessionEndedError(401, e);
           }
           if (isSpAuthError(e) && e.status === 403) {
-            const err = csrfFailed(e, !csrf || !seenHeader);
+            const err = csrfFailed(e, !sent || (!seenHeader && !csrfWasStored));
             fail(err);
             throw err;
           }
@@ -474,6 +508,10 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           const csrf = await currentCsrf();
           return csrf ? { [headerName]: csrf } : {};
         },
+        async recoverCsrfHeaders(sent) {
+          const live = await recoverCsrf(sent[headerName] ?? null, true);
+          return live === null ? null : { ...sent, [headerName]: live };
+        },
         async hydrate() {
           listen();
           // Migration from the body transport: never keep tokens around in this mode.
@@ -523,14 +561,23 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
           if (csrf) headers[headerName] = csrf;
           const host = ctx.options.endpoints.logout;
-          await ctx.http({
-            method: 'POST',
-            endpoint: host || PACKAGE_REVOKE_PATH,
-            body: host && everywhere ? { everywhere: true } : undefined,
-            headers,
-            credentials: 'include',
-            module: 'logout',
-          });
+          const revoke = (h: Record<string, string>) =>
+            ctx.http({
+              method: 'POST',
+              endpoint: host || PACKAGE_REVOKE_PATH,
+              body: host && everywhere ? { everywhere: true } : undefined,
+              headers: h,
+              credentials: 'include',
+              module: 'logout',
+            });
+          try {
+            await revoke(headers);
+          } catch (e) {
+            // Logged out locally already: the live value is used for this one retry, never stored.
+            const live = isSpAuthError(e) && e.status === 403 ? await recoverCsrf(csrf, false) : null;
+            if (live === null) throw e;
+            await revoke({ ...headers, [headerName]: live });
+          }
         },
         dispose() {
           disposed = true;

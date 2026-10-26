@@ -322,7 +322,7 @@ describe('cookie transport: restore()', () => {
     expect(s.auth.getState().status).toBe('authenticated');
   });
 
-  it('a 403 rejects csrf_failed with the exposed_headers hint and leaves the state unchanged', async () => {
+  it('a 403 on a stored value rejects csrf_failed with a neutral message and leaves the state unchanged', async () => {
     const store = memoryStore();
     await store.set({ csrf: 'stale' });
     const s = setup(() => json({ message: 'CSRF token mismatch.' }, 403), { storage: store });
@@ -330,10 +330,47 @@ describe('cookie transport: restore()', () => {
     expect(err).toBeInstanceOf(SpAuthError);
     expect((err as SpAuthError).code).toBe('csrf_failed');
     expect((err as SpAuthError).status).toBe(403);
-    expect((err as SpAuthError).message).toContain('exposed_headers');
-    expect((err as SpAuthError).message).toContain('X-SP-CSRF');
+    // a stored value was sent: a mismatch, not a CORS exposure problem (even right after a reload)
+    expect((err as SpAuthError).message).not.toContain('exposed_headers');
+    expect((err as SpAuthError).message).toContain('does not match');
+    expect((err as SpAuthError).message).toContain('reload');
+    expect(s.calls).toHaveLength(1); // no document: no retry
     expect(s.auth.getState().status).toBe('unknown');
     expect(await store.get()).toEqual({ csrf: 'stale' });
+    expect(s.events.map((e) => e.type)).not.toContain('session_ended');
+  });
+
+  it('a refresh 403 with no value ever obtained (header hidden cross-site) carries the exposed_headers hint', async () => {
+    // login response without X-SP-CSRF and no readable cookie: what a cross-site API without exposed_headers looks like
+    const s = setup((c) => (c.path === '/auth/login' ? json(pairBody(fresh1)) : json({ message: 'CSRF token mismatch.' }, 403)));
+    await s.auth.login({});
+    const err = await s.auth.refresh().catch((e: unknown) => e);
+    expect((err as SpAuthError).code).toBe('csrf_failed');
+    expect(s.calls[1]!.headers.get('X-SP-CSRF')).toBeNull();
+    expect((err as SpAuthError).message).toContain('exposed_headers');
+    expect((err as SpAuthError).message).toContain('X-SP-CSRF');
+    expect(s.auth.getState().status).toBe('authenticated');
+  });
+
+  it('a login that lands while restore() is in flight is not wiped by its 401 (no tab context)', async () => {
+    const store = memoryStore();
+    await store.set({ csrf: 'old' });
+    let releaseRefresh!: (r: Response) => void;
+    const s = setup(
+      (c) =>
+        c.path === '/auth/login'
+          ? json(pairBody(fresh1), 200, { 'X-SP-CSRF': 'c-login' })
+          : new Promise<Response>((r) => (releaseRefresh = r)),
+      { storage: store },
+    );
+    const restoring = s.auth.restore();
+    await flush();
+    await s.auth.login({});
+    releaseRefresh(json({ message: 'Unauthenticated.' }, 401));
+    await expect(restoring).resolves.toBeUndefined();
+    expect(s.auth.getState().status).toBe('authenticated');
+    expect(await s.auth.getAccessToken()).toBe(fresh1);
+    expect((await store.get())?.csrf).toBe('c-login');
     expect(s.events.map((e) => e.type)).not.toContain('session_ended');
   });
 
@@ -359,6 +396,94 @@ describe('cookie transport: restore()', () => {
     const s = setup(() => json({}, 401), { storage: store });
     await s.auth.ready();
     expect(await store.get()).toEqual({ csrf: 'c', deviceId: 'd' });
+  });
+});
+
+describe('cookie transport: stale stored csrf recovers from the readable cookie', () => {
+  it('refresh: on 403 the live sp_csrf cookie is stored and the request retried once', async () => {
+    const store = memoryStore();
+    await store.set({ csrf: 'old' });
+    stubDocument('sp_csrf=new%2Bone'); // another tab (private store, no channel) rotated it
+    let n = 0;
+    const s = setup(
+      () => (++n === 1 ? json({ message: 'CSRF token mismatch.' }, 403) : json({ access_token: fresh1, expires_in: 900, token_type: 'Bearer' }, 200, { 'X-SP-CSRF': 'after' })),
+      { storage: store },
+    );
+    await s.auth.restore();
+    expect(s.calls.map((c) => c.headers.get('X-SP-CSRF'))).toEqual(['old', 'new+one']);
+    expect(s.auth.getState().status).toBe('authenticated');
+    expect((await store.get())?.csrf).toBe('after');
+    expect(s.events.map((e) => e.type)).toEqual(['refresh']);
+  });
+
+  it('retries only once: a second 403 is csrf_failed', async () => {
+    const store = memoryStore();
+    await store.set({ csrf: 'old' });
+    stubDocument('sp_csrf=new');
+    const s = setup(() => json({ message: 'CSRF token mismatch.' }, 403), { storage: store });
+    const err = await s.auth.restore().catch((e: unknown) => e);
+    expect((err as SpAuthError).code).toBe('csrf_failed');
+    expect(s.calls).toHaveLength(2);
+    expect(s.auth.getState().status).toBe('unknown');
+  });
+
+  it('no retry when the cookie is absent or equal to the value sent', async () => {
+    for (const cookie of ['theme=dark', 'sp_csrf=old']) {
+      const store = memoryStore();
+      await store.set({ csrf: 'old' });
+      stubDocument(cookie);
+      const s = setup(() => json({ message: 'CSRF token mismatch.' }, 403), { storage: store });
+      const err = await s.auth.restore().catch((e: unknown) => e);
+      expect((err as SpAuthError).code).toBe('csrf_failed');
+      expect(s.calls).toHaveLength(1);
+    }
+  });
+
+  it('revoke: a 403 is retried once with the live cookie, and nothing is stored afterwards', async () => {
+    stubDocument('');
+    let revokes = 0;
+    const s = setup((c) => {
+      if (c.path === '/auth/login') return json(pairBody(fresh1), 200, { 'X-SP-CSRF': 'c1' });
+      return ++revokes === 1 ? json({ message: 'CSRF token mismatch.' }, 403) : new Response(null, { status: 204 });
+    });
+    await s.store.set({ deviceId: 'd1' });
+    await s.auth.login({});
+    stubDocument('sp_csrf=c9');
+    await s.auth.logout();
+    expect(s.calls.slice(1).map((c) => [c.path, c.headers.get('X-SP-CSRF')])).toEqual([
+      ['/auth/token/revoke', 'c1'],
+      ['/auth/token/revoke', 'c9'],
+    ]);
+    expect(s.events[s.events.length - 1]).toEqual({ type: 'logout', everywhere: false });
+    expect(await s.store.get()).toEqual({ deviceId: 'd1' });
+  });
+
+  it('switchCompany: a 403 is retried once with the live cookie', async () => {
+    stubDocument('');
+    let switches = 0;
+    const s = setup((c) => {
+      if (c.path === '/auth/login') return json(pairBody(fresh1), 200, { 'X-SP-CSRF': 'c1' });
+      return ++switches === 1
+        ? json({ message: 'CSRF token mismatch.' }, 403)
+        : json({ access_token: fresh2, expires_in: 900, token_type: 'Bearer' }, 200, { 'X-SP-CSRF': 'c3' });
+    });
+    await s.auth.login({});
+    stubDocument('sp_csrf=c9');
+    await s.auth.switchCompany(5);
+    expect(s.calls.slice(1).map((c) => c.headers.get('X-SP-CSRF'))).toEqual(['c1', 'c9']);
+    expect(s.auth.getState().companyId).toBe('5');
+    expect((await s.store.get())?.csrf).toBe('c3');
+  });
+
+  it('switchCompany: no retry without a document', async () => {
+    const s = setup((c) =>
+      c.path === '/auth/login' ? json(pairBody(fresh1), 200, { 'X-SP-CSRF': 'c1' }) : json({ message: 'CSRF token mismatch.' }, 403),
+    );
+    await s.auth.login({});
+    const err = await s.auth.switchCompany(5).catch((e: unknown) => e);
+    expect((err as SpAuthError).status).toBe(403);
+    expect(s.calls).toHaveLength(2);
+    expect(s.auth.getState().claims?.sub).toBe('7');
   });
 });
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import readme from '../../README.md?raw';
 import errorsSource from '../../src/core/errors.ts?raw';
 import self from './readme-snippets.test.ts?raw';
-import { createJwtAuth, memoryStore, presets, userSession, webStorageStore } from '../../src/index';
+import { createJwtAuth, memoryStore, presets, staticToken, userSession, webStorageStore } from '../../src/index';
 import type { AuthState, JwtAuth } from '../../src/index';
 
 // The README snippets below are copied verbatim (imports aside) between the region markers.
@@ -228,6 +228,32 @@ describe('README servers: one instance per request', () => {
   });
 });
 
+describe('README server modes: staticToken per request', () => {
+  it('reads the token on every call and sends it to the host', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    // #region snippet:statictoken
+    // import { createJwtAuth, presets, staticToken } from '@sopheak/sp-jwt-auth';
+
+    function authForIncomingRequest(req: { headers: Record<string, string | undefined> }) {
+      return createJwtAuth({
+        baseUrl: 'https://api.example.com',
+        ...presets.spJwtTest,
+        mode: staticToken(() => req.headers.authorization?.replace(/^Bearer /i, '')), // read on every call
+      });
+    }
+
+    const userAuth = authForIncomingRequest({ headers: { authorization: 'Bearer user-token' } });
+    console.log(await userAuth.getHeaders()); // { Authorization: 'Bearer user-token' }
+    await userAuth.whoami(); // GET /me as that user
+    // #endregion
+    expect(log).toHaveBeenCalledWith({ Authorization: 'Bearer user-token' });
+    expect(calls.map((c) => c.url.pathname)).toEqual(['/me']);
+    expect(calls[0]!.headers.get('Authorization')).toBe('Bearer user-token');
+    const anonymous = authForIncomingRequest({ headers: {} });
+    expect(await anonymous.getHeaders()).toEqual({});
+  });
+});
+
 describe('README cookie transport', () => {
   it('restores, logs in and out with credentials and X-SP-CSRF; localStorage never holds a token', async () => {
     const BODY_RT = 'rt-readme-cookie-never-stored';
@@ -317,7 +343,7 @@ function normalise(code: string): string {
 }
 
 describe('README stays in sync with this file', () => {
-  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest', 'cookie'])('snippet %s matches', (name) => {
+  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest', 'cookie', 'statictoken'])('snippet %s matches', (name) => {
     expect(block(readme, name)).toBe(region(self, name));
   });
 

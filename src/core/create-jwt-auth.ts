@@ -329,15 +329,26 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         const stored = runtime.peekAccessToken ? await runtime.peekAccessToken() : null;
         const headers: Record<string, string> = runtime.tokenRequestHeaders ? await runtime.tokenRequestHeaders() : {};
         if (stored) headers.Authorization = `Bearer ${stored}`;
-        const { body: raw, response } = await http<unknown>({
-          method: 'POST',
-          endpoint: path,
-          body,
-          device: true,
-          headers,
-          credentials: runtime.credentials,
-          module: 'switchCompany',
-        });
+        const send = (h: Record<string, string>) =>
+          http<unknown>({
+            method: 'POST',
+            endpoint: path,
+            body,
+            device: true,
+            headers: h,
+            credentials: runtime.credentials,
+            module: 'switchCompany',
+          });
+        let result: Awaited<ReturnType<typeof send>>;
+        try {
+          result = await send(headers);
+        } catch (e) {
+          // Cookie transport: a stale CSRF value is retried once with the live cookie value.
+          const retry = isSpAuthError(e) && e.status === 403 && runtime.recoverCsrfHeaders ? await runtime.recoverCsrfHeaders(headers) : null;
+          if (retry === null) throw e;
+          result = await send(retry);
+        }
+        const { body: raw, response } = result;
         // Validates the pair before anything is stored: an invalid response keeps the current tokens.
         // No `body` on the error when the transport is the cookie: a `both`-mode body may carry a refresh token.
         if (!findTokenPair(unwrap(unwrapMode, raw))) {

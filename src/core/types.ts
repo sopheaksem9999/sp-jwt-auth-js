@@ -200,6 +200,12 @@ export interface ModeRuntime {
    * cookie (company switch): the cookie transport's `X-SP-CSRF`. Without it, none.
    */
   tokenRequestHeaders?(): Promise<Record<string, string>>;
+  /**
+   * After a 403 on such a call: replacement headers for ONE retry (the cookie
+   * transport's live `sp_csrf` value, when it differs from the one sent), or
+   * `null` for no retry.
+   */
+  recoverCsrfHeaders?(sent: Record<string, string>): Promise<Record<string, string> | null>;
   /** Restores a session from the server on page load (cookie transport). Without it `JwtAuth.restore()` is `ready()`. */
   restore?(): Promise<void>;
   /** Releases listeners and channels (e.g. the cross-tab subscription). */
