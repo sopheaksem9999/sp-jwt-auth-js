@@ -21,6 +21,12 @@ await s.revokeDevice('device-id');
 
 `:sid` and `:deviceId` are replaced with `encodeURIComponent(value)`; a value that is empty, `.` or `..` is rejected (`invalid_request`, no request) because a dot segment would change the path.
 
+A `sessionRevoke` / `deviceRevoke` endpoint without its `:sid` / `:deviceId` placeholder throws `not_configured` (no request).
+
+`revokeDevice` does **not** clear local state, even if that device holds the current session: use `list()` then `revoke(sid)` for the current one, or call `auth.clearSession()` yourself.
+
+Authenticated calls here rely on proactive refresh (`getAccessToken` refreshes ahead of expiry); unlike `auth.whoami()`, which retries once on a 401 through the refresh engine, a 401 is surfaced as an error.
+
 ## Decision: `except_sid` (host-defined)
 
 The backend's `revokeAllForUser($user, $exceptSid)` takes the session to keep, but the route is yours, so the body is this client's default `{ except_sid }`. Override it with `sessions(auth, { revokeOthersBody: (sid) => ({ ... }) })`. Without a current `sid` (opaque token, anonymous) the default throws `not_configured` ("no current session id") **before** any request: an empty exception would revoke the caller's own session. A custom `revokeOthersBody` receives `null` and decides itself.

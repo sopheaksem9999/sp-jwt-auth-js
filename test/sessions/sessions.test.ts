@@ -45,7 +45,7 @@ interface Setup {
 
 async function setup(
   respond: (c: Call) => Response,
-  o: { endpoints?: Record<string, string>; access?: string | null; unwrap?: Unwrap } = {},
+  o: { endpoints?: Record<string, string>; access?: string | null; unwrap?: Unwrap; skipReady?: boolean } = {},
 ): Promise<Setup> {
   const calls: Call[] = [];
   const f = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
@@ -71,7 +71,7 @@ async function setup(
     ...(o.unwrap ? { unwrap: o.unwrap } : {}),
     onEvent: (e) => events.push(e),
   });
-  await auth.ready();
+  if (o.skipReady !== true) await auth.ready();
   return { auth, store, calls, events };
 }
 
@@ -299,5 +299,35 @@ describe('sessions: secrets', () => {
     // An HTTP-status error keeps the host body by core design; messages and the cause chain must be clean.
     const all = [...errs.map((e) => `${e.message}|${e.name}|${deepStrings(e.cause).join('|')}`), ...deepStrings([s.events, s.auth.getState()])].join('|');
     for (const secret of [REFRESH, ACCESS, 'body-token-xyz']) expect(all).not.toContain(secret);
+  });
+});
+
+describe('sessions: fresh client (no ready() before the call)', () => {
+  it('revoke(currentSid) clears the local session', async () => {
+    const s = await setup(() => json({}), { skipReady: true });
+    await sessions(s.auth).revoke('s-current');
+    expect(s.auth.getState().status).toBe('anonymous');
+    expect(await s.store.get()).toBeNull();
+  });
+
+  it('revokeOthers sends { except_sid } for a signed-in user', async () => {
+    const s = await setup(() => json({}), { skipReady: true });
+    await sessions(s.auth).revokeOthers();
+    expect(JSON.parse(s.calls[0]?.body ?? '')).toEqual({ except_sid: 's-current' });
+  });
+
+  it('list marks current', async () => {
+    const s = await setup(() => json([{ id: 's-current' }]), { skipReady: true });
+    expect((await sessions(s.auth).list())[0]?.current).toBe(true);
+  });
+});
+
+describe('sessions: endpoint without its placeholder', () => {
+  it('sessionRevoke without :sid and deviceRevoke without :deviceId -> not_configured, no request', async () => {
+    const s = await setup(() => json({}), { endpoints: { ...ENDPOINTS, sessionRevoke: '/auth/sessions', deviceRevoke: '/auth/devices' } });
+    const a = await caught(sessions(s.auth).revoke('x'));
+    const b = await caught(sessions(s.auth).revokeDevice('x'));
+    expect([a.code, a.module, b.code, b.module]).toEqual(['not_configured', 'sessions', 'not_configured', 'sessions']);
+    expect(s.calls).toHaveLength(0);
   });
 });

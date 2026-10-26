@@ -59,6 +59,9 @@ function unknownError(message: string, cause?: unknown): SpAuthError {
 
 /** Replaces `:name` in a configured route with the URL-encoded value; dot segments and empty values are refused. */
 function fill(endpoint: string, name: string, value: unknown): string {
+  if (!endpoint.includes(`:${name}`)) {
+    throw new SpAuthError({ status: 0, code: 'not_configured', message: `Endpoint is missing the :${name} placeholder`, module: MODULE });
+  }
   if (typeof value !== 'string' || value === '' || value === '.' || value === '..') {
     throw new SpAuthError({ status: 0, code: 'invalid_request', message: `Invalid ${name}`, module: MODULE });
   }
@@ -84,6 +87,7 @@ export function sessions(auth: JwtAuth, options: SessionsOptions = {}): Sessions
   return {
     async list() {
       const endpoint = auth.endpoint('sessions', MODULE);
+      await auth.ready();
       const { body: raw } = await auth.http<unknown>({ method: 'GET', endpoint, bearer: true, module: MODULE });
       let value: unknown;
       try {
@@ -102,6 +106,7 @@ export function sessions(auth: JwtAuth, options: SessionsOptions = {}): Sessions
 
     async revoke(sid) {
       const endpoint = fill(auth.endpoint('sessionRevoke', MODULE), 'sid', sid);
+      await auth.ready(); // claims are only populated once persisted state has been read
       const wasCurrent = currentSid() === sid;
       await auth.http<unknown>({ method, endpoint, bearer: true, module: MODULE });
       if (wasCurrent) await auth.clearSession();
@@ -109,6 +114,7 @@ export function sessions(auth: JwtAuth, options: SessionsOptions = {}): Sessions
 
     async revokeOthers() {
       const endpoint = auth.endpoint('sessionRevokeOthers', MODULE);
+      await auth.ready();
       const sid = currentSid();
       let body: Record<string, unknown>;
       if (options.revokeOthersBody) {
