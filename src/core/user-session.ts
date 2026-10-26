@@ -1,4 +1,4 @@
-import { createCrossTab } from './crosstab';
+import { createCrossTab, storeScopedCrossTab } from './crosstab';
 import type { CrossTab } from './crosstab';
 import { SpAuthError } from './errors';
 import { createRefresher, isSessionEnded, performTokenRefresh, waitFor } from './refresh';
@@ -12,22 +12,32 @@ export interface UserSessionOptions {
   /** `'body'` (default): refresh token in storage. `'cookie'`: httpOnly cookie (not implemented yet). */
   transport?: 'body' | 'cookie';
   /**
-   * Cross-tab coordination (spec §4.5 rule 3); on by default. `false` turns
-   * the lock and broadcast off (servers, tests). `key` names the lock
-   * `sp-jwt-auth:refresh:<key>` and the channel; it defaults to the
-   * `webStorageStore` key, else `'default'`. `instance` supplies a ready-made
-   * `CrossTab` (tests, or to `close()` it yourself).
+   * Cross-tab coordination (spec §4.5 rule 3).
+   * - Default: ON for a `webStorageStore` (lock and channel named after its
+   *   key). For a memory or custom store there is no cross-tab identity, so the
+   *   default is a store-scoped in-process lock only (instances over the SAME
+   *   store object serialise; no channel, no globals). That keeps per-request
+   *   sessions on a server fully isolated.
+   * - `true` or `{ key }`: ON with that key (`true` without a store key uses `'default'`).
+   * - `{ instance }`: a ready-made `CrossTab` (tests, or to manage it yourself;
+   *   `dispose()` then only unsubscribes and does not close it).
+   * - `false`: no lock and no broadcast beyond the per-instance single flight.
    */
   crossTab?: boolean | { key?: string; instance?: CrossTab };
 }
 
-function resolveCrossTab(options: UserSessionOptions): CrossTab | null {
+function resolveCrossTab(options: UserSessionOptions): { crossTab: CrossTab | null; owned: boolean } {
   const o = options.crossTab;
-  if (o === false) return null;
-  if (typeof o === 'object' && o.instance) return o.instance;
-  const key = (typeof o === 'object' ? o.key : undefined) ?? options.storage.storageKey ?? 'default';
-  // The storage-event fallback only makes sense for a web-storage key.
-  return createCrossTab(key, { storageKey: options.storage.storageKey ?? null });
+  const store = options.storage;
+  if (o === false) return { crossTab: null, owned: false };
+  if (typeof o === 'object' && o.instance) return { crossTab: o.instance, owned: false };
+  const explicitKey = typeof o === 'object' ? o.key : undefined;
+  if (o === true || explicitKey !== undefined || store.storageKey !== undefined) {
+    const key = explicitKey ?? store.storageKey ?? 'default';
+    // The storage-event fallback only makes sense for a web-storage key.
+    return { crossTab: createCrossTab(key, { storageKey: store.storageKey ?? null }), owned: true };
+  }
+  return { crossTab: storeScopedCrossTab(store), owned: true };
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
@@ -65,11 +75,13 @@ function bearerFrom(headers: Record<string, string> | undefined): string | null 
  * through the same single flight, unless the failed request's bearer token is
  * already older than the stored one (then it resolves `true` at once).
  *
- * Tabs (spec §4.5 rule 3, `crossTab`, on by default): each refresh runs under
- * the cross-tab lock and first re-reads the store, adopting a pair another tab
+ * Tabs (spec §4.5 rule 3, see `crossTab` for when it is on): each refresh runs
+ * under the lock and first re-reads the store, adopting a pair another tab
  * already rotated. Login, refresh and every session clear are broadcast (access
  * token and expiry only); on a message, other instances re-read the shared
- * store and update their state, so it always follows the store.
+ * store and update their state, so it always follows the store. The channel is
+ * opened on first use (hydration), never at creation; `JwtAuth.dispose()`
+ * unsubscribes and closes it.
  */
 export function userSession(options: UserSessionOptions): AuthMode {
   if (options.transport === 'cookie') {
@@ -84,7 +96,7 @@ export function userSession(options: UserSessionOptions): AuthMode {
   return {
     kind: 'userSession',
     create(baseCtx: ModeContext): ModeRuntime {
-      const crossTab = resolveCrossTab(options);
+      const { crossTab, owned } = resolveCrossTab(options);
       // Bumped on every local state change, so a sync triggered by another tab never applies a stale read.
       let generation = 0;
       const ctx: ModeContext = {
@@ -120,12 +132,21 @@ export function userSession(options: UserSessionOptions): AuthMode {
         if (t?.accessToken) ctx.setAuthenticated(t.accessToken);
         else ctx.setAnonymous();
       };
-      crossTab?.onMessage(() => {
-        void syncFromStore();
-      });
+      let unsubscribe: (() => void) | null = null;
+      let disposed = false;
+      // Subscribed on first use, so creating a session opens nothing.
+      const listen = (): void => {
+        if (disposed || unsubscribe || !crossTab) return;
+        unsubscribe = crossTab.onMessage(() => {
+          void syncFromStore();
+        });
+      };
 
       const refresher = createRefresher({ perform: performTokenRefresh({ ctx, store, clearSession, crossTab }) });
-      const refresh = (): Promise<void> => refresher.refresh();
+      const refresh = (): Promise<void> => {
+        listen();
+        return refresher.refresh();
+      };
       const aheadSeconds = (): number => ctx.options.refreshAheadSeconds ?? 60;
 
       const peekAccessToken = async (): Promise<string | null> => (await safeGet(store))?.accessToken ?? null;
@@ -180,6 +201,7 @@ export function userSession(options: UserSessionOptions): AuthMode {
         },
         refresh,
         async hydrate() {
+          listen();
           const t = await safeGet(store);
           if (ctx.getState().status !== 'unknown') return; // a login/logout already resolved state
           const access = t?.accessToken;
@@ -202,6 +224,12 @@ export function userSession(options: UserSessionOptions): AuthMode {
           crossTab?.broadcast({ type: 'tokens', accessToken: pair.access_token, expiresAt: tokens.expiresAt ?? 0 });
         },
         clearSession,
+        dispose() {
+          disposed = true;
+          unsubscribe?.();
+          unsubscribe = null;
+          if (owned) crossTab?.close();
+        },
       };
     },
   };

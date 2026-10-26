@@ -36,21 +36,46 @@ export interface CrossTabDeps {
   storageKey?: string | null;
 }
 
-const chains = new Map<string, Promise<unknown>>();
+type ChainMap<K> = { get(k: K): Promise<unknown> | undefined; set(k: K, v: Promise<unknown>): unknown; delete(k: K): unknown };
 
-/** Promise-chain mutex shared by every caller in this process that uses the same name. */
-function mutex<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const prev = chains.get(name) ?? Promise.resolve();
+/** Promise-chain mutex: callers using the same `k` in `map` run one at a time. */
+function exclusive<K, T>(map: ChainMap<K>, k: K, fn: () => Promise<T>): Promise<T> {
+  const prev = map.get(k) ?? Promise.resolve();
   const run = prev.then(() => fn());
   const tail = run.then(
     () => undefined,
     () => undefined,
   );
-  chains.set(name, tail);
+  map.set(k, tail);
   void tail.then(() => {
-    if (chains.get(name) === tail) chains.delete(name);
+    if (map.get(k) === tail) map.delete(k);
   });
   return run;
+}
+
+/** Named chains: shared by every `createCrossTab` with the same key in this process. */
+const named = new Map<string, Promise<unknown>>();
+const mutex = <T>(name: string, fn: () => Promise<T>): Promise<T> => exclusive(named, name, fn);
+
+/** Chains scoped to one store object (no string key, so unrelated sessions never share a lock). */
+const scoped = new WeakMap<object, Promise<unknown>>();
+
+/**
+ * Local coordinator for a store with no cross-tab identity (memory or custom
+ * store, no explicit key): an in-process mutex scoped to `scope` (the store
+ * object), so instances over the SAME store serialise their refreshes, while
+ * instances over different stores (e.g. per-request sessions on a server)
+ * share nothing. No channel, no globals; `broadcast` is a no-op and
+ * `lastBroadcast()` is always `null`.
+ */
+export function storeScopedCrossTab(scope: object): CrossTab {
+  return {
+    withLock: (fn) => exclusive(scoped, scope, fn),
+    broadcast: () => undefined,
+    onMessage: () => () => undefined,
+    lastBroadcast: () => null,
+    close: () => undefined,
+  };
 }
 
 function detectLocks(): LockManagerLike | null {
@@ -136,8 +161,10 @@ function fromStorageEvent(e: Event, watched: string): TabMessage | null {
  *   else the `storage` event on the watched web-storage key (where
  *   `addEventListener` exists), else nothing (edge/Node: `broadcast` is a no-op).
  *
- * Every global is feature-detected and guarded. Call `close()` when the
- * instance is no longer used.
+ * `lastBroadcast()` is per instance and only ever filled from messages received
+ * on this key's channel (or storage key). Every global is feature-detected and
+ * guarded, and nothing is opened until the first `broadcast`/`onMessage`. Call
+ * `close()` when the instance is no longer used.
  */
 export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
   const lockName = `sp-jwt-auth:refresh:${key}`;
@@ -159,34 +186,40 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
   };
 
   let channel: BroadcastChannel | null = null;
-  try {
-    if (deps.channel === undefined) channel = detectChannel(channelName);
-    else if (deps.channel) channel = deps.channel(channelName);
-  } catch {
-    channel = null;
-  }
-  const onChannel = (e: Event): void => deliver(sanitize((e as MessageEvent).data));
-  if (channel) {
-    try {
-      channel.addEventListener('message', onChannel);
-    } catch {
-      channel = null;
-    }
-  }
-
   let events: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> | null = null;
+  const onChannel = (e: Event): void => deliver(sanitize((e as MessageEvent).data));
   const watched = deps.storageKey === undefined ? key : deps.storageKey;
   const onStorage = (e: Event): void => {
     if (watched !== null) deliver(fromStorageEvent(e, watched));
   };
-  if (!channel && watched !== null) {
-    events = deps.events === undefined ? detectEvents() : deps.events;
+
+  // Opened lazily, on the first `broadcast` or `onMessage`: creating a CrossTab touches no globals.
+  let opened = false;
+  const open = (): void => {
+    if (opened || closed) return;
+    opened = true;
     try {
-      events?.addEventListener('storage', onStorage);
+      if (deps.channel === undefined) channel = detectChannel(channelName);
+      else if (deps.channel) channel = deps.channel(channelName);
     } catch {
-      events = null;
+      channel = null;
     }
-  }
+    if (channel) {
+      try {
+        channel.addEventListener('message', onChannel);
+      } catch {
+        channel = null;
+      }
+    }
+    if (!channel && watched !== null) {
+      events = deps.events === undefined ? detectEvents() : deps.events;
+      try {
+        events?.addEventListener('storage', onStorage);
+      } catch {
+        events = null;
+      }
+    }
+  };
 
   const locks = deps.locks === undefined ? detectLocks() : deps.locks;
 
@@ -216,6 +249,7 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
       const clean = sanitize(m);
       if (!clean) return;
       if (clean.type === 'logout') last = null;
+      open();
       if (closed || !channel) return;
       try {
         channel.postMessage(clean);
@@ -226,6 +260,7 @@ export function createCrossTab(key: string, deps: CrossTabDeps = {}): CrossTab {
 
     onMessage(cb) {
       if (closed) return () => undefined;
+      open();
       listeners.add(cb);
       return () => {
         listeners.delete(cb);

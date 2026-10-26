@@ -124,14 +124,16 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
  * Failures:
  * - Refresh 401, or no refresh token stored: clears the session, emits
  *   `session_ended` and throws `SpAuthError('session_ended')`.
- * - Refresh 401 where the stored refresh token changed while the request was in
- *   flight (another tab rotated, or a re-login): the stored tokens are adopted,
- *   `reuse_suspected` is emitted, nothing is cleared and the refresh resolves.
+ * - Refresh 401 where the store meanwhile holds a different refresh token AND
+ *   an access token (another tab rotated, or a re-login): that pair is adopted,
+ *   only `reuse_suspected` is emitted (no `refresh_failed`), nothing is cleared
+ *   and the refresh resolves. A different refresh token with no access token
+ *   is treated as a plain refresh 401 (session ended).
  * - Network error, timeout, 5xx or another 4xx: tokens and state are kept and
  *   the `SpAuthError` is rethrown.
  * - A 2xx without a valid pair: tokens kept, throws `SpAuthError('unknown')`.
  *
- * Every failed request emits `refresh_failed` (`status`, `code` only). The
+ * Every other failure emits `refresh_failed` (`status`, `code` only). The
  * request uses the HTTP helper's own controller and timeout, never a caller's
  * signal. If the stored refresh token changed while the request was in flight
  * (logout, login, another tab), the response is not stored.
@@ -191,19 +193,24 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
         module: 'refresh',
       }));
     } catch (e) {
-      fail(e);
       if (isSpAuthError(e) && e.status === 401) {
         const latest = await safeGet(store);
-        if (latest?.refreshToken === sent) await endSession(401, e);
-        if (latest?.refreshToken) {
-          // Another tab rotated (or a re-login landed) while this request was in flight:
-          // the server saw our token as reused, but the session continues with the stored pair.
+        if (latest?.refreshToken && latest.refreshToken !== sent && latest.accessToken) {
+          // Another tab rotated (or a re-login landed) while this request was in flight: the
+          // server saw our token as reused, but a newer pair is stored, so continue with it.
+          // NOTE: under the server's `revoke_session` reuse policy that pair may have been
+          // revoked too; if so its next use gets a 401 and the session ends normally then.
           adopt(latest);
           ctx.emit({ type: 'reuse_suspected', status: 401 });
           return;
         }
-        throw sessionEndedError(401, e);
+        fail(e);
+        // Logged out meanwhile: already anonymous, nothing to clear.
+        if (!latest?.refreshToken) throw sessionEndedError(401, e);
+        // Same token, or a newer refresh token with no access token to adopt: the session is over.
+        await endSession(401, e);
       }
+      fail(e);
       throw e;
     }
 

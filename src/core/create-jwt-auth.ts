@@ -285,5 +285,13 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     endpoint,
     acceptTokens,
     clearSession,
+
+    dispose() {
+      try {
+        runtime.dispose?.();
+      } catch {
+        /* disposal never throws */
+      }
+    },
   };
 }

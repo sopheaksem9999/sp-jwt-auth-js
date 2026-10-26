@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createJwtAuth, userSession } from '../../src/core/create-jwt-auth';
 import type { AuthEvent, JwtAuth, ModeContext } from '../../src/core/create-jwt-auth';
-import { createCrossTab } from '../../src/core/crosstab';
+import { createCrossTab, storeScopedCrossTab } from '../../src/core/crosstab';
 import type { CrossTab, TabMessage } from '../../src/core/crosstab';
 import { performTokenRefresh } from '../../src/core/refresh';
 import { memoryStore, webStorageStore } from '../../src/core/stores';
@@ -37,6 +37,27 @@ function deferred<T>(): Deferred<T> {
 /** Lets queued microtasks (fake channel delivery, store reads) run; no timers. */
 async function flush(): Promise<void> {
   for (let i = 0; i < 30; i++) await Promise.resolve();
+}
+
+/** Spies standing in for `navigator.locks` and `BroadcastChannel`. */
+function stubGlobals(): { locks: { request: ReturnType<typeof vi.fn> }; constructed: string[]; closed: number } {
+  const out = { locks: { request: vi.fn((_n: string, cb: () => Promise<unknown>) => cb()) }, constructed: [] as string[], closed: 0 };
+  vi.stubGlobal('navigator', { locks: out.locks });
+  vi.stubGlobal(
+    'BroadcastChannel',
+    class {
+      constructor(name: string) {
+        out.constructed.push(name);
+      }
+      addEventListener(): void {}
+      removeEventListener(): void {}
+      postMessage(): void {}
+      close(): void {
+        out.closed++;
+      }
+    },
+  );
+  return out;
 }
 
 function json(body: unknown, status = 200): Response {
@@ -230,51 +251,117 @@ describe('two instances sharing a store (two tabs)', () => {
     }
   });
 
-  it('crossTab: false disables the lock and the broadcast', async () => {
-    const locks = { request: vi.fn((_n: string, cb: () => Promise<unknown>) => cb()) };
-    const constructed: string[] = [];
-    vi.stubGlobal('navigator', { locks });
-    vi.stubGlobal(
-      'BroadcastChannel',
-      class {
-        constructor(name: string) {
-          constructed.push(name);
-        }
-        addEventListener(): void {}
-        removeEventListener(): void {}
-        postMessage(): void {}
-        close(): void {}
-      },
-    );
+  it('crossTab: false disables the lock and the broadcast; true / key / webStorageStore turn it on, lazily', async () => {
+    const g = stubGlobals();
     const store = memoryStore();
     await store.set(nearExpiry());
-    const auth = createJwtAuth({
+    const off = createJwtAuth({
       baseUrl: 'https://api.test/api',
       endpoints: {},
       mode: userSession({ storage: store, crossTab: false }),
       fetch: (async () => json(pair2)) as typeof globalThis.fetch,
     });
-    await auth.refresh();
-    expect(locks.request).not.toHaveBeenCalled();
-    expect(constructed).toEqual([]);
+    await off.refresh();
+    expect(g.locks.request).not.toHaveBeenCalled();
+    expect(g.constructed).toEqual([]);
 
-    // Default (on): the store's key, else 'default', names both the lock and the channel.
+    // Explicit `true` without a store key: 'default'. Nothing opens before first use.
     await store.set(nearExpiry());
     const on = createJwtAuth({
       baseUrl: 'https://api.test/api',
       endpoints: {},
-      mode: userSession({ storage: store }),
+      mode: userSession({ storage: store, crossTab: true }),
       fetch: (async () => json(pair2)) as typeof globalThis.fetch,
     });
+    expect(g.constructed).toEqual([]);
     await on.refresh();
-    expect(locks.request).toHaveBeenCalledWith('sp-jwt-auth:refresh:default', expect.any(Function));
-    expect(constructed).toEqual(['sp-jwt-auth:tabs:default']);
+    expect(g.locks.request).toHaveBeenCalledWith('sp-jwt-auth:refresh:default', expect.any(Function));
+    expect(g.constructed).toEqual(['sp-jwt-auth:tabs:default']);
 
-    const keyed = Object.assign(memoryStore(), {});
-    Object.defineProperty(keyed, 'storageKey', { value: 'app.auth' });
-    createJwtAuth({ baseUrl: 'https://api.test', endpoints: {}, mode: userSession({ storage: keyed }) });
-    createJwtAuth({ baseUrl: 'https://api.test', endpoints: {}, mode: userSession({ storage: keyed, crossTab: { key: 'custom' } }) });
-    expect(constructed.slice(1)).toEqual(['sp-jwt-auth:tabs:app.auth', 'sp-jwt-auth:tabs:custom']);
+    // webStorageStore: default ON, named after its key; `{ key }` overrides.
+    const web = createJwtAuth({ baseUrl: 'https://api.test', endpoints: {}, mode: userSession({ storage: webStorageStore('localStorage', 'app.auth') }) });
+    const custom = createJwtAuth({ baseUrl: 'https://api.test', endpoints: {}, mode: userSession({ storage: memoryStore(), crossTab: { key: 'custom' } }) });
+    expect(g.constructed).toHaveLength(1); // lazy: created, not used yet
+    await web.ready();
+    await custom.ready();
+    expect(g.constructed.slice(1)).toEqual(['sp-jwt-auth:tabs:app.auth', 'sp-jwt-auth:tabs:custom']);
+    for (const a of [on, web, custom]) a.dispose?.();
+    expect(g.closed).toBe(3);
+  });
+});
+
+describe('default for memory / custom stores (servers, SSR)', () => {
+  it('per-request sessions over memory stores open no channel and touch no navigator.locks', async () => {
+    const g = stubGlobals();
+    for (let i = 0; i < 3; i++) {
+      const store = memoryStore();
+      const auth = createJwtAuth({
+        baseUrl: 'https://api.test/api',
+        endpoints: { login: '/auth/login' },
+        mode: userSession({ storage: store }),
+        fetch: (async (url: RequestInfo | URL) =>
+          String(url).endsWith('/auth/login') ? json({ ...pair2, access_token: access1 }) : json(pair2)) as typeof globalThis.fetch,
+      });
+      await auth.login({});
+      expect(await auth.getAccessToken()).toBe(access2); // near expiry -> refresh
+      await auth.logout();
+    }
+    expect(g.constructed).toEqual([]);
+    expect(g.locks.request).not.toHaveBeenCalled();
+  });
+
+  it('two instances over ONE memory store still make one refresh request at expiry', async () => {
+    const store = memoryStore();
+    await store.set(nearExpiry());
+    let calls = 0;
+    const fetch = (async () => {
+      calls++;
+      return json(pair2);
+    }) as typeof globalThis.fetch;
+    const events: AuthEvent[] = [];
+    const mk = (): JwtAuth =>
+      createJwtAuth({ baseUrl: 'https://api.test/api', endpoints: {}, mode: userSession({ storage: store }), fetch, onEvent: (e) => events.push(e) });
+    const [a, b] = [mk(), mk()];
+    expect(await Promise.all([a.getAccessToken(), b.getAccessToken()])).toEqual([access2, access2]);
+    expect(calls).toBe(1);
+    expect(events).toEqual([{ type: 'refresh' }, { type: 'refresh', adopted: true }]);
+  });
+
+  it('instances over DIFFERENT memory stores neither serialise nor share anything', async () => {
+    const gate = deferred<void>();
+    const mk = (blocked: boolean): Promise<JwtAuth> => {
+      const store = memoryStore();
+      return store.set(nearExpiry()).then(() =>
+        createJwtAuth({
+          baseUrl: 'https://api.test/api',
+          endpoints: {},
+          mode: userSession({ storage: store }),
+          fetch: (async () => {
+            if (blocked) await gate.promise;
+            return json(pair2);
+          }) as typeof globalThis.fetch,
+        }),
+      );
+    };
+    const a = await mk(true);
+    const b = await mk(false);
+    const pa = a.getAccessToken();
+    await flush();
+    // a's refresh is stuck in flight; b must not wait for it.
+    expect(await b.getAccessToken()).toBe(access2);
+    gate.resolve();
+    expect(await pa).toBe(access2);
+
+    // The store-scoped coordinator never shares messages or lastBroadcast.
+    const s1 = storeScopedCrossTab(memoryStore());
+    const s2 = storeScopedCrossTab(memoryStore());
+    const got: TabMessage[] = [];
+    s2.onMessage((m) => got.push(m));
+    s1.broadcast({ type: 'tokens', accessToken: 'x', expiresAt: now() + 900 });
+    await flush();
+    expect(got).toEqual([]);
+    expect(s1.lastBroadcast()).toBeNull();
+    expect(s2.lastBroadcast()).toBeNull();
   });
 });
 
@@ -299,12 +386,30 @@ describe('reuse suspected', () => {
     expect(await store.get()).toEqual({ accessToken: access3, refreshToken: RT3, expiresAt: expect.any(Number), deviceId: 'd1' });
     expect(a.auth.getState().status).toBe('authenticated');
     expect(a.auth.getState().companyId).toBe('9');
-    const types = a.events.map((e) => e.type);
-    expect(types).toContain('reuse_suspected');
-    expect(types).not.toContain('session_ended');
+    expect(a.events).toEqual([{ type: 'reuse_suspected', status: 401 }]); // not refresh_failed as well
     const wire = JSON.stringify(a.events);
     for (const secret of [RT1, RT3, access1, access3]) expect(wire).not.toContain(secret);
     expect(await a.auth.getAccessToken()).toBe(access3);
+  });
+
+  it('a refresh 401 where the store has a newer refresh token but no access token ends the session', async () => {
+    const store = memoryStore();
+    await store.set(nearExpiry());
+    const gate = deferred<void>();
+    const fetch = (async () => {
+      await gate.promise;
+      return json({}, 401);
+    }) as typeof globalThis.fetch;
+    const a = tab(store, fetch, { locks: fakeLocks(), channel: null, events: null });
+    await a.auth.ready();
+    const h = a.auth.handleUnauthorized();
+    await flush();
+    await store.set({ refreshToken: RT3, deviceId: 'd1' });
+    gate.resolve();
+    expect(await h).toBe(false);
+    expect(a.events.map((e) => e.type)).toEqual(['refresh_failed', 'session_ended']);
+    expect(a.auth.getState().status).toBe('anonymous');
+    expect(await store.get()).toEqual({ deviceId: 'd1' });
   });
 
   it('a refresh 401 with the store unchanged still ends the session', async () => {
@@ -429,9 +534,10 @@ describe('createCrossTab', () => {
     const a = createCrossTab('k', { locks: null, channel: bus.factory, events: null });
     const b = createCrossTab('k', { locks: null, channel: bus.factory, events: null });
     opened.push(a, b);
-    expect(bus.names).toEqual(['sp-jwt-auth:tabs:k', 'sp-jwt-auth:tabs:k']);
+    expect(bus.names).toEqual([]); // lazy: nothing opened at creation
     const got: TabMessage[] = [];
     b.onMessage((m) => got.push(m));
+    expect(bus.names).toEqual(['sp-jwt-auth:tabs:k']);
 
     a.broadcast({ type: 'tokens', accessToken: 'at', expiresAt: 123, refreshToken: RT1 } as unknown as TabMessage);
     await flush();
@@ -450,6 +556,17 @@ describe('createCrossTab', () => {
       if (ch.name === 'sp-jwt-auth:tabs:k') for (const l of [...ch.listeners]) l({ data: { type: 'tokens', accessToken: 5 } });
     }
     expect(got).toHaveLength(2);
+  });
+
+  it('lastBroadcast is filled only from the same key\'s channel', async () => {
+    const bus = new FakeBus();
+    const a = createCrossTab('k1', { locks: null, channel: bus.factory, events: null });
+    const b = createCrossTab('k2', { locks: null, channel: bus.factory, events: null });
+    opened.push(a, b);
+    b.onMessage(() => undefined);
+    a.broadcast({ type: 'tokens', accessToken: 'at', expiresAt: 1 });
+    await flush();
+    expect(b.lastBroadcast()).toBeNull();
   });
 
   it('a throwing listener does not break the others', async () => {
@@ -477,8 +594,11 @@ describe('createCrossTab', () => {
     const off = b.onMessage((m) => got.push(m));
     off();
     b.onMessage((m) => got.push(m));
+    const bChannel = [...bus.open][0]!;
     b.close();
-    expect([...bus.open].map((c) => c.name)).toEqual(['sp-jwt-auth:tabs:k']); // only a's remains
+    expect(bChannel.closed).toBe(true);
+    expect(bChannel.listeners.size).toBe(0);
+    expect(bus.open.size).toBe(0);
     a.broadcast({ type: 'logout' });
     await flush();
     expect(got).toEqual([]);
@@ -505,6 +625,41 @@ describe('createCrossTab', () => {
     ct.close();
     fire('app.auth', stored, null);
     expect(got).toHaveLength(2);
+  });
+});
+
+describe('dispose', () => {
+  it('JwtAuth.dispose() removes the subscription and closes an owned channel; an injected instance is only unsubscribed', async () => {
+    const bus = new FakeBus();
+    const injected = createCrossTab('k', { locks: null, channel: bus.factory, events: null });
+    opened.push(injected);
+    const store = memoryStore();
+    const auth = createJwtAuth({
+      baseUrl: 'https://api.test',
+      endpoints: {},
+      mode: userSession({ storage: store, crossTab: { instance: injected } }),
+    });
+    expect(bus.names).toEqual([]);
+    await auth.ready(); // first use subscribes
+    const ch = [...bus.open][0]!;
+    expect(ch.listeners.size).toBe(1);
+    auth.dispose?.();
+    auth.dispose?.(); // idempotent
+    expect(ch.closed).toBe(false); // the caller owns the injected instance
+    // A message no longer reaches the disposed session.
+    const other = createCrossTab('k', { locks: null, channel: bus.factory, events: null });
+    opened.push(other);
+    await store.set({ accessToken: access2, refreshToken: RT2 });
+    other.broadcast({ type: 'tokens', accessToken: access2, expiresAt: 0 });
+    await flush();
+    expect(auth.getState().status).toBe('anonymous');
+
+    const g = stubGlobals();
+    const owned = createJwtAuth({ baseUrl: 'https://api.test', endpoints: {}, mode: userSession({ storage: memoryStore(), crossTab: { key: 'x' } }) });
+    await owned.ready();
+    owned.dispose?.();
+    expect(g.constructed).toEqual(['sp-jwt-auth:tabs:x']);
+    expect(g.closed).toBe(1);
   });
 });
 

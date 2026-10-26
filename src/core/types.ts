@@ -181,6 +181,8 @@ export interface ModeRuntime {
   logout?(o: { everywhere?: boolean; accessToken: string | null }): Promise<void>;
   /** Restores a session from the server (Task 20, cookie transport). */
   restore?(): Promise<void>;
+  /** Releases listeners and channels (e.g. the cross-tab subscription). */
+  dispose?(): void;
 }
 
 /** An auth strategy; `create` is called once by `createJwtAuth`. */
@@ -240,4 +242,10 @@ export interface JwtAuth {
   acceptTokens(rawBody: unknown): Promise<void>;
   /** Module surface: clears the session without a network call. */
   clearSession(): Promise<void>;
+  /**
+   * Releases what the mode holds open (the cross-tab subscription and channel).
+   * Call it when the client is discarded (e.g. a test, or an app unmount); the
+   * client should not be used afterwards. Idempotent.
+   */
+  dispose?(): void;
 }
