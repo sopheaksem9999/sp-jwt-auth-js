@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createJwtAuth, userSession } from '../../src/core/create-jwt-auth';
 import type { AuthEvent, JwtAuthOptions } from '../../src/core/create-jwt-auth';
 import { SpAuthError } from '../../src/core/errors';
-import { createRefresher } from '../../src/core/refresh';
+import { createRefresher, waitFor } from '../../src/core/refresh';
 import { memoryStore } from '../../src/core/stores';
 import type { TokenStore, Tokens } from '../../src/core/stores';
 
@@ -447,6 +447,80 @@ describe('handleUnauthorized', () => {
   });
 });
 
+describe('handleUnauthorized with the failed request', () => {
+  it('a 401 that arrives after the refresh completed retries with the new token without refreshing again', async () => {
+    const { auth, calls } = await seeded(nearExpiry(), () => json(pair2));
+    expect(await auth.getAccessToken()).toBe(access2);
+    expect(calls).toHaveLength(1);
+    expect(await auth.handleUnauthorized({ headers: { Authorization: `Bearer ${access1}` } })).toBe(true);
+    expect(await auth.handleUnauthorized({ headers: { authorization: `bearer ${access1}` } })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(await auth.getAccessToken()).toBe(access2);
+  });
+
+  it('refreshes when the failed request carried the current token', async () => {
+    let n = 0;
+    const { auth, calls } = await seeded({ accessToken: access1, refreshToken: 'r1', expiresAt: now() + 900 }, () =>
+      json(n++ === 0 ? pair2 : { ...pair2, refresh_token: 'r3' }),
+    );
+    expect(await auth.handleUnauthorized({ headers: { Authorization: `Bearer ${access1}` } })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(await auth.handleUnauthorized({ headers: { 'X-Other': 'x' } })).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a 401 from a stale token joins a refresh that is still running', async () => {
+    const gate = deferred<void>();
+    const { auth, calls } = await seeded(nearExpiry(), async () => {
+      await gate.promise;
+      return json(pair2);
+    });
+    const t = auth.getAccessToken();
+    const h = auth.handleUnauthorized({ headers: { Authorization: `Bearer ${access1}` } });
+    await new Promise((r) => setTimeout(r, 0));
+    gate.resolve();
+    expect(await t).toBe(access2);
+    expect(await h).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('getAccessToken and handleUnauthorized running together share one flight', async () => {
+    const gate = deferred<void>();
+    const { auth, calls } = await seeded(nearExpiry(), async () => {
+      await gate.promise;
+      return json(pair2);
+    });
+    const all = Promise.all([auth.getAccessToken(), auth.handleUnauthorized(), auth.getAccessToken(), auth.handleUnauthorized()]);
+    await new Promise((r) => setTimeout(r, 0));
+    gate.resolve();
+    expect(await all).toEqual([access2, true, access2, true]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('a refresh 401 after a re-login during the request keeps the new session and resolves true', async () => {
+    const access3 = jwt({ sub: '8', exp: now() + 900 });
+    const gate = deferred<void>();
+    const { auth, store, events } = await seeded({ ...nearExpiry(), deviceId: 'd1' }, async (c) => {
+      if (c.url.endsWith('/auth/token/refresh')) {
+        await gate.promise;
+        return json({}, 401);
+      }
+      return json({ access_token: access3, refresh_token: 'r3', expires_in: 900, token_type: 'Bearer' });
+    });
+    await auth.ready();
+    const h = auth.handleUnauthorized();
+    await new Promise((r) => setTimeout(r, 0));
+    await auth.login({});
+    gate.resolve();
+    expect(await h).toBe(true);
+    const t = await store.get();
+    expect(t?.accessToken).toBe(access3);
+    expect(t?.refreshToken).toBe('r3');
+    expect(auth.getState().status).toBe('authenticated');
+    expect(eventTypes(events)).not.toContain('session_ended');
+  });
+});
+
 describe('caller-abort isolation', () => {
   it('an aborted getAccessToken waiter does not cancel the shared refresh; the other waiters get the new token', async () => {
     const gate = deferred<void>();
@@ -475,6 +549,24 @@ describe('caller-abort isolation', () => {
     const ac = new AbortController();
     ac.abort(new Error('early'));
     await expect(auth.getAccessToken({ signal: ac.signal })).rejects.toThrow('early');
+  });
+
+  it('a pre-aborted signal with a failing refresh starts no refresh and leaves no unhandled rejection', async () => {
+    const { auth, calls } = await seeded(nearExpiry(), () => Promise.reject(new TypeError('offline')));
+    const ac = new AbortController();
+    ac.abort(new Error('early'));
+    await expect(auth.getAccessToken({ signal: ac.signal })).rejects.toThrow('early');
+    await expect(auth.handleUnauthorized({ signal: ac.signal })).rejects.toThrow('early');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toHaveLength(0);
+  });
+
+  it('waitFor handles the shared promise even when the signal is already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('gone'));
+    const shared = Promise.reject(new Error('refresh failed'));
+    await expect(waitFor(shared, ac.signal)).rejects.toThrow('gone');
+    await new Promise((r) => setTimeout(r, 0)); // an unhandled rejection of `shared` would fail the run
   });
 
   it('an aborted handleUnauthorized waiter does not cancel the shared refresh', async () => {

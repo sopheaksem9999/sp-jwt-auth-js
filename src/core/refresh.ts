@@ -44,9 +44,11 @@ export function createRefresher(deps: RefresherDeps): Refresher {
 /**
  * Waits for `p` on behalf of one caller. Aborting `signal` rejects only this
  * wait (with the signal's reason); `p` itself, and anyone else awaiting it, is
- * unaffected.
+ * unaffected. `p` always gets a rejection handler, so an abandoned shared
+ * promise that later rejects is never an unhandled rejection.
  */
 export function waitFor<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  p.catch(() => undefined);
   if (!signal) return p;
   if (signal.aborted) return Promise.reject(signal.reason as unknown);
   return new Promise<T>((resolve, reject) => {
@@ -104,7 +106,9 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
  * state and emits `refresh`.
  *
  * - Refresh 401, or no refresh token stored: clears the session, emits
- *   `session_ended` and throws `SpAuthError('session_ended')`.
+ *   `session_ended` and throws `SpAuthError('session_ended')`. If the stored
+ *   refresh token changed while the request was in flight (a newer session
+ *   exists), nothing is cleared and the refresh resolves.
  * - Network error, timeout, 5xx or another 4xx: tokens and state are kept and
  *   the `SpAuthError` is rethrown.
  * - A 2xx without a valid pair: tokens kept, throws `SpAuthError('unknown')`.
@@ -150,7 +154,10 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     } catch (e) {
       fail(e);
       if (isSpAuthError(e) && e.status === 401) {
-        if ((await safeGet(store))?.refreshToken === sent) await endSession(401, e);
+        const latest = (await safeGet(store))?.refreshToken;
+        if (latest === sent) await endSession(401, e);
+        // A newer session (re-login, or a rotation that landed meanwhile) exists: use it.
+        if (latest) return;
         throw sessionEndedError(401, e);
       }
       throw e;

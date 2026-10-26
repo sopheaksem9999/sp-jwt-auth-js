@@ -76,6 +76,17 @@ export interface AuthEvent {
   [k: string]: unknown;
 }
 
+/**
+ * Optional argument to `handleUnauthorized`: the failed request's `headers`
+ * (its `Authorization: Bearer` token tells a stale-token 401 from one that
+ * needs a refresh; lookup is case-insensitive) and a `signal` that stops this
+ * caller's wait without cancelling the shared refresh.
+ */
+export interface UnauthorizedContext {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
 /** Options for `createJwtAuth`. */
 export interface JwtAuthOptions {
   /** Origin plus host prefix, e.g. `https://api.example.com/api/v2`. */
@@ -150,8 +161,9 @@ export interface ModeRuntime {
   /**
    * Called on a 401: `true` when the request may be retried, `false` when the
    * session is gone; rejects on a transient refresh failure (tokens kept).
+   * See `UnauthorizedContext` for the optional argument.
    */
-  handleUnauthorized(o?: { signal?: AbortSignal }): Promise<boolean>;
+  handleUnauthorized(failed?: UnauthorizedContext): Promise<boolean>;
   /** Reads persisted state once and resolves `unknown` to `authenticated`/`anonymous`. */
   hydrate?(): Promise<void>;
   /** Unwraps a raw body, stores the pair and updates state. */
@@ -189,8 +201,12 @@ export interface JwtAuth {
   logout(o?: { everywhere?: boolean }): Promise<void>;
   /**
    * Current access token or `null`; refreshes first (single flight) when it is
-   * within `refreshAheadSeconds` of expiry. Aborting `signal` rejects this call
-   * with the signal's reason without cancelling the shared refresh.
+   * within `refreshAheadSeconds` of expiry (or already past it). If that
+   * proactive refresh fails transiently (network, timeout, 5xx, other non-401),
+   * the still-valid current token is returned; the call rejects only once the
+   * token has expired. A refresh 401 ends the session and resolves `null`.
+   * Aborting `signal` rejects this call with the signal's reason without
+   * cancelling the shared refresh.
    */
   getAccessToken(o?: { signal?: AbortSignal }): Promise<string | null>;
   /** `{ Authorization: 'Bearer …' }` or `{}`: the `ApiAuth` contract. */
@@ -199,9 +215,11 @@ export interface JwtAuth {
    * 401 handler: refreshes once (shared single flight). Resolves `true` when the
    * request may be retried once, `false` when the session is gone (state
    * `anonymous`, `session_ended` emitted); rejects with the `SpAuthError` on a
-   * network error, timeout, 5xx or other non-401 failure, tokens kept.
+   * network error, timeout, 5xx or other non-401 failure, tokens kept. When
+   * `failed.headers` carries a bearer token that differs from the stored one, a
+   * refresh already happened and it resolves `true` without a request.
    */
-  handleUnauthorized(o?: { signal?: AbortSignal }): Promise<boolean>;
+  handleUnauthorized(failed?: UnauthorizedContext): Promise<boolean>;
   /** Refreshes now (single flight); throws `not_configured` when the mode cannot refresh, `session_ended` when the session is over. */
   refresh(): Promise<void>;
   /** Resolves once persisted state has been read (state leaves `unknown`). */

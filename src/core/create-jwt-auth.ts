@@ -28,6 +28,7 @@ export type {
   LoginResult,
   ModeContext,
   ModeRuntime,
+  UnauthorizedContext,
 } from './types';
 export type { AuthState } from './state';
 export type { HttpRequest, HttpResult } from './http';

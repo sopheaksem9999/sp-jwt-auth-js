@@ -25,5 +25,6 @@ export type {
   LoginResult,
   ModeContext,
   ModeRuntime,
+  UnauthorizedContext,
   UserSessionOptions,
 } from './core/create-jwt-auth';

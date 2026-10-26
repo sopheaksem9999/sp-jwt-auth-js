@@ -19,6 +19,17 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
   }
 }
 
+/** Token from an `Authorization: Bearer …` header (header name and scheme case-insensitive), or `null`. */
+function bearerFrom(headers: Record<string, string> | undefined): string | null {
+  if (!headers) return null;
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() !== 'authorization') continue;
+    const m = /^\s*bearer\s+(\S+)\s*$/i.exec(v);
+    return m?.[1] ?? null;
+  }
+  return null;
+}
+
 /**
  * Browser / single-user session mode: login, logout, tokens persisted in `storage`.
  *
@@ -32,7 +43,8 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
  * when `expiresAt` is already past. If that proactive refresh fails transiently
  * (network, timeout, 5xx) the current token is still returned while it has not
  * expired; once expired, the error is rethrown. `handleUnauthorized()` refreshes
- * through the same single flight.
+ * through the same single flight, unless the failed request's bearer token is
+ * already older than the stored one (then it resolves `true` at once).
  */
 export function userSession(options: UserSessionOptions): AuthMode {
   if (options.transport === 'cookie') {
@@ -77,6 +89,7 @@ export function userSession(options: UserSessionOptions): AuthMode {
           ctx.emit({ type: 'session_ended' });
           return null;
         }
+        if (o?.signal?.aborted) throw o.signal.reason;
         try {
           await waitFor(refresh(), o?.signal);
         } catch (e) {
@@ -99,6 +112,10 @@ export function userSession(options: UserSessionOptions): AuthMode {
         async handleUnauthorized(o) {
           const t = await safeGet(store);
           if (!t?.accessToken && !t?.refreshToken) return false;
+          // The failed request used an older token: a refresh already happened, so just retry (§4.5 rule 4).
+          const failed = bearerFrom(o?.headers);
+          if (failed !== null && t.accessToken && failed !== t.accessToken) return true;
+          if (o?.signal?.aborted) throw o.signal.reason;
           try {
             await waitFor(refresh(), o?.signal);
             return true;
