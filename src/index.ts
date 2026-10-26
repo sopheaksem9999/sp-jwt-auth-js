@@ -11,3 +11,19 @@ export { decodeClaims } from './core/claims';
 export type { Claims } from './core/claims';
 export { ensureDeviceId, memoryStore, webStorageStore } from './core/stores';
 export type { TokenStore, Tokens } from './core/stores';
+export { createJwtAuth, userSession } from './core/create-jwt-auth';
+export type {
+  AuthEvent,
+  AuthMode,
+  AuthState,
+  Challenge,
+  Endpoints,
+  HttpRequest,
+  HttpResult,
+  JwtAuth,
+  JwtAuthOptions,
+  LoginResult,
+  ModeContext,
+  ModeRuntime,
+  UserSessionOptions,
+} from './core/create-jwt-auth';
