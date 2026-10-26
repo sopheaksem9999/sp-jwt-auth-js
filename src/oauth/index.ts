@@ -1,4 +1,4 @@
-import { SpAuthError, isSpAuthError } from '../core/errors';
+import { SpAuthError, isSpAuthError, sanitizedCause } from '../core/errors';
 import { userSession } from '../core/user-session';
 import type { UserSessionOptions } from '../core/user-session';
 import type { AuthMode, JwtAuth, ModeContext, ModeRuntime } from '../core/types';
@@ -7,7 +7,12 @@ import { generateCodeVerifier, pkceChallenge, randomBase64url } from './pkce';
 export { generateCodeVerifier, pkceChallenge } from './pkce';
 
 const MODULE = 'oauth';
+/** Default pending-store key prefix; the client id is appended, so two clients on one origin do not share records. */
 const PENDING_KEY = 'sp-jwt-auth:oauth:pending';
+/** A started login older than this (seconds) is dropped when the pending store is read. */
+const PENDING_TTL_SECONDS = 600;
+/** At most this many unfinished logins are kept; the oldest are dropped first. */
+const PENDING_MAX = 20;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -18,8 +23,8 @@ function notConfigured(what: string): SpAuthError {
 }
 
 function unknownError(message: string, cause?: unknown): SpAuthError {
-  // No `body`, and the cause is dropped from the message: a malformed response may carry token values.
-  return new SpAuthError({ status: 0, code: 'unknown', message, module: MODULE, cause });
+  // No `body`, and the cause is reduced to name/status/code: a malformed response may carry token values and loggers print `cause`.
+  return new SpAuthError({ status: 0, code: 'unknown', message, module: MODULE, cause: sanitizedCause(cause) });
 }
 
 /** Raw `id:secret` bytes as Basic credentials, as the backend reads them (`OAuthServerService.php:326-329`, no urldecode). */
@@ -29,20 +34,32 @@ function basicHeader(id: string, secret: string): string {
   return `Basic ${btoa(bin)}`;
 }
 
-/** The login in flight: what `beginLogin` persists and `completeLogin` consumes exactly once. */
-export interface PendingLogin {
-  /** The anti-CSRF `state` sent to the authorize URL. */
-  state: string;
+/** One login in flight: the PKCE verifier and when `beginLogin` ran (epoch seconds). */
+export interface PendingEntry {
   /** The PKCE `code_verifier` whose S256 challenge was sent. */
   verifier: string;
+  /** When the login was started, epoch seconds; entries older than 10 minutes are pruned. */
+  createdAt: number;
 }
 
-/** Where the pending login survives the redirect. A single record: a newer `beginLogin` replaces it. */
+/** Everything the pending store holds: the logins in flight, keyed by their `state`. */
+export type PendingLogins = Record<string, PendingEntry>;
+
+/**
+ * Where the logins in flight survive the redirect: one value holding a map
+ * keyed by `state`, so two logins started in the same tab or session do not
+ * invalidate each other. On a server, give each user's own session-backed store
+ * (see the README); a store shared between users would let them see each other's verifiers.
+ *
+ * `completeLogin` removes the callback's entry with `set`; a custom store whose
+ * `set` throws leaves that entry in place, so its callback URL could be replayed
+ * until it expires. Make `set` reliable.
+ */
 export interface PendingStore {
-  /** The pending login, or `null`. */
-  get(): Promise<PendingLogin | null> | PendingLogin | null;
-  /** Saves the pending login; `null` removes it. */
-  set(value: PendingLogin | null): Promise<void> | void;
+  /** The pending logins, or `null`. */
+  get(): Promise<PendingLogins | null> | PendingLogins | null;
+  /** Saves the pending logins; `null` removes everything. */
+  set(value: PendingLogins | null): Promise<void> | void;
 }
 
 interface WebStorage {
@@ -60,25 +77,32 @@ function sessionStorageOrNull(): WebStorage | null {
   }
 }
 
-function isPending(v: unknown): v is PendingLogin {
-  return isRecord(v) && typeof v.state === 'string' && v.state !== '' && typeof v.verifier === 'string' && v.verifier !== '';
+function isEntry(v: unknown): v is PendingEntry {
+  return isRecord(v) && typeof v.verifier === 'string' && v.verifier !== '' && typeof v.createdAt === 'number';
+}
+
+function asLogins(v: unknown): PendingLogins {
+  const out: PendingLogins = {};
+  if (!isRecord(v)) return out;
+  for (const [state, entry] of Object.entries(v)) if (isEntry(entry)) out[state] = { verifier: entry.verifier, createdAt: entry.createdAt };
+  return out;
 }
 
 /**
- * Default pending store: `sessionStorage` when it works (so the record survives
- * the redirect and dies with the tab), every access guarded; a memory copy is
- * kept as well, so a blocked or absent `sessionStorage` still works without a reload.
+ * Default pending store, under `sp-jwt-auth:oauth:pending:<clientId>`:
+ * `sessionStorage` when it works (so the records survive the redirect and die
+ * with the tab), every access guarded; a memory copy is kept as well, so a blocked
+ * or absent `sessionStorage` still works without a reload. On a server there is no
+ * `sessionStorage`, so this is one in-memory slot: pass a per-user `pendingStore` there.
  */
-function defaultPendingStore(): PendingStore {
-  let memory: PendingLogin | null = null;
+function defaultPendingStore(clientId: string): PendingStore {
+  const key = `${PENDING_KEY}:${clientId}`;
+  let memory: PendingLogins | null = null;
   return {
     get() {
       try {
-        const raw = sessionStorageOrNull()?.getItem(PENDING_KEY);
-        if (typeof raw === 'string') {
-          const v: unknown = JSON.parse(raw);
-          if (isPending(v)) return v;
-        }
+        const raw = sessionStorageOrNull()?.getItem(key);
+        if (typeof raw === 'string') return asLogins(JSON.parse(raw));
       } catch {
         /* blocked or corrupt: fall back to memory */
       }
@@ -89,8 +113,8 @@ function defaultPendingStore(): PendingStore {
       try {
         const s = sessionStorageOrNull();
         if (s) {
-          if (value === null) s.removeItem(PENDING_KEY);
-          else s.setItem(PENDING_KEY, JSON.stringify(value));
+          if (value === null) s.removeItem(key);
+          else s.setItem(key, JSON.stringify(value));
         }
       } catch {
         /* the memory copy remains */
@@ -137,8 +161,8 @@ export interface OAuthAuthorizationCodeMode extends AuthMode {
    * Finishes a login from the redirect back to `redirectUri`: checks `state`
    * against the pending record, exchanges `code` with the stored verifier at the token
    * URL and stores the pair through the mode (so the refresh token, store and state
-   * follow the normal rules). The pending record is cleared on every outcome, so a
-   * callback URL is never usable twice. A callback `error` is thrown as
+   * follow the normal rules). The callback's pending entry (looked up by `state`) is
+   * consumed on every outcome, so a callback URL is never usable twice; other logins in flight are untouched. A callback `error` is thrown as
    * `SpAuthError` with `code` = that error (e.g. `access_denied`); a missing or
    * different `state` is `invalid_state`; a missing `code` is `invalid_request`;
    * token endpoint failures carry the RFC 6749 `error` as `code`. On any failure nothing is stored.
@@ -157,12 +181,10 @@ function authorizeUrlWith(base: string, query: Record<string, string>): string {
   return `${head}${sep}${q}${tail}`;
 }
 
-function sameString(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+/** RFC 6749 §5.2 `error`: `%x20-21 / %x23-5B / %x5D-7E`, at most 64 characters. */
+const ERROR_CODE = /^[\x20\x21\x23-\x5B\x5D-\x7E]{1,64}$/;
+/** Same charset for `error_description`, at most 300 characters. */
+const ERROR_DESCRIPTION = /^[\x20\x21\x23-\x5B\x5D-\x7E]{1,300}$/;
 
 /**
  * OAuth 2.0 authorization-code mode with PKCE, for a client logging users in
@@ -179,61 +201,89 @@ function sameString(a: string, b: string): boolean {
  *
  * The app holds the returned mode object: `beginLogin` / `completeLogin` are
  * bound to the client once it is created with this mode, and reject
- * `SpAuthError('not_configured')` before that. Use one mode object per client.
+ * `SpAuthError('not_configured')` before that. **One mode object per client**: a second
+ * `createJwtAuth` with the same mode throws `not_configured` (unless the first client was
+ * `dispose()`d). A server must build the mode per user or request, with a `pendingStore`
+ * backed by that user's server session.
  */
 export function oauthAuthorizationCode(options: OAuthAuthorizationCodeOptions): OAuthAuthorizationCodeMode {
   const inner = userSession(options.session);
-  const pending = options.pendingStore ?? defaultPendingStore();
+  const pending = options.pendingStore ?? defaultPendingStore(options.clientId);
   const scope = typeof options.scope === 'string' ? options.scope : options.scope.join(' ');
-  let bound: { ctx: ModeContext; runtime: ModeRuntime; hydrated: () => Promise<void> } | null = null;
+  let bound: { ctx: ModeContext; runtime: ModeRuntime; hydrated: () => Promise<void>; disposed: boolean } | null = null;
 
   const requireBound = (): NonNullable<typeof bound> => {
     if (!bound) throw notConfigured('oauthAuthorizationCode (pass the mode to createJwtAuth first)');
     return bound;
   };
 
-  const take = async (): Promise<PendingLogin | null> => {
-    let record: PendingLogin | null = null;
+  /** Pending logins with the expired and surplus ones removed (oldest first). */
+  const readLogins = async (nowSeconds: number): Promise<PendingLogins> => {
+    let raw: unknown = null;
     try {
-      const v = await pending.get();
-      record = isPending(v) ? v : null;
+      raw = await pending.get();
     } catch {
-      record = null;
+      raw = null;
+    }
+    const live = Object.entries(asLogins(raw)).filter(([, v]) => nowSeconds - v.createdAt < PENDING_TTL_SECONDS);
+    live.sort((a, b) => a[1].createdAt - b[1].createdAt);
+    return Object.fromEntries(live.slice(-PENDING_MAX));
+  };
+
+  const writeLogins = async (logins: PendingLogins): Promise<void> => {
+    await pending.set(Object.keys(logins).length === 0 ? null : logins);
+  };
+
+  /** Removes and returns the entry for `state` (single use); expired entries are pruned in the same write. */
+  const take = async (nowSeconds: number, state: string | null): Promise<PendingEntry | null> => {
+    const logins = await readLogins(nowSeconds);
+    let found: PendingEntry | null = null;
+    if (state !== null && Object.prototype.hasOwnProperty.call(logins, state)) {
+      found = logins[state] ?? null;
+      delete logins[state];
     }
     try {
-      await pending.set(null); // single use, whatever happens next
+      await writeLogins(logins);
     } catch {
-      /* a store that cannot clear is the app's problem; the record was read once here */
+      /* a store that cannot save is the app's problem; see PendingStore */
     }
-    return record;
+    return found;
   };
 
   const complete = async (callbackUrl: string): Promise<void> => {
     const { ctx, runtime, hydrated } = requireBound();
-    const record = await take();
-    let url: URL;
+    let url: URL | null = null;
     try {
       url = new URL(callbackUrl, 'http://localhost');
     } catch {
+      url = null;
+    }
+    const q = url?.searchParams ?? new URLSearchParams();
+    const state = q.get('state');
+    // Consumed before anything else can fail, so this state is never usable again.
+    const record = await take(ctx.now(), state === '' ? null : state);
+    if (url === null) {
       throw new SpAuthError({ status: 0, code: 'invalid_request', message: 'Callback URL is not valid', module: MODULE });
     }
-    const q = url.searchParams;
-    const state = q.get('state');
-    if (record === null || state === null || !sameString(state, record.state)) {
+    if (record === null || state === null) {
       throw new SpAuthError({
         status: 0,
         code: 'invalid_state',
-        message: 'Login callback state is missing or does not match the pending login',
+        message: 'Login callback state is missing or does not match a pending login',
         module: MODULE,
       });
     }
     const error = q.get('error');
     if (error !== null && error !== '') {
-      const description = (q.get('error_description') ?? '').slice(0, 300);
+      // Attacker-controlled text: only a well-formed RFC 6749 §5.2 code is surfaced, and nothing invalid is echoed.
+      if (!ERROR_CODE.test(error)) {
+        throw new SpAuthError({ status: 0, code: 'invalid_request', message: 'Login callback carried an invalid error value', module: MODULE });
+      }
+      const description = q.get('error_description') ?? '';
       throw new SpAuthError({
         status: 0,
         code: error,
-        message: description !== '' ? description : `Authorization failed: ${error}`,
+        message: ERROR_DESCRIPTION.test(description) ? description : `Authorization failed: ${error}`,
         module: MODULE,
       });
     }
@@ -265,49 +315,78 @@ export function oauthAuthorizationCode(options: OAuthAuthorizationCodeOptions): 
     });
     try {
       await hydrated();
+    } catch {
+      /* the facade's ready() handles a failed hydration; the login can still proceed */
+    }
+    try {
       await runtime.acceptTokens?.(body, response);
     } catch (e) {
-      if (isSpAuthError(e) && e.code !== 'unknown') throw e;
+      // Core errors for an invalid pair carry no body or raw cause; anything else is reduced to a fixed message.
+      if (isSpAuthError(e)) throw e;
       throw unknownError('Token response could not be accepted', e);
     }
     ctx.emit({ type: 'login', oauth: true });
   };
 
-  // One completion at a time, so two copies of a callback cannot both read the pending record.
+  // One begin/complete at a time: the pending value is read-modify-write, and two copies of a callback must exchange once.
   let chain: Promise<unknown> = Promise.resolve();
+  const serial = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = chain.then(fn);
+    chain = run.catch(() => undefined);
+    return run;
+  };
 
   return {
     kind: 'oauthAuthorizationCode',
     create(ctx) {
+      if (bound && !bound.disposed) {
+        throw new SpAuthError({
+          status: 0,
+          code: 'not_configured',
+          message: 'oauthAuthorizationCode mode is already attached to a client; create one mode per client/request',
+          module: MODULE,
+        });
+      }
       const runtime = inner.create(ctx);
-      // Memoised so the facade's own `ready()` and `completeLogin` share one hydration.
+      // Memoised so the facade's own `ready()` and `completeLogin` share one hydration. A failure is rethrown to the facade.
       let hydration: Promise<void> | null = null;
-      const hydrated = (): Promise<void> => (hydration ??= Promise.resolve(runtime.hydrate?.()).catch(() => undefined));
-      bound = { ctx, runtime, hydrated };
-      return { ...runtime, hydrate: hydrated };
+      const hydrated = (): Promise<void> => (hydration ??= Promise.resolve().then(() => runtime.hydrate?.()));
+      const me = { ctx, runtime, hydrated, disposed: false };
+      bound = me;
+      return {
+        ...runtime,
+        hydrate: hydrated,
+        dispose() {
+          me.disposed = true;
+          runtime.dispose?.();
+        },
+      };
     },
 
-    async beginLogin() {
-      requireBound();
-      const state = randomBase64url(32);
-      const verifier = generateCodeVerifier();
-      const challenge = await pkceChallenge(verifier);
-      await pending.set({ state, verifier });
-      return authorizeUrlWith(options.authorizeUrl, {
-        response_type: 'code',
-        client_id: options.clientId,
-        redirect_uri: options.redirectUri,
-        scope,
-        state,
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
+    beginLogin() {
+      return serial(async () => {
+        const { ctx } = requireBound();
+        const state = randomBase64url(32);
+        const verifier = generateCodeVerifier();
+        const challenge = await pkceChallenge(verifier);
+        const nowSeconds = ctx.now();
+        const logins = await readLogins(nowSeconds);
+        logins[state] = { verifier, createdAt: nowSeconds };
+        await writeLogins(logins);
+        return authorizeUrlWith(options.authorizeUrl, {
+          response_type: 'code',
+          client_id: options.clientId,
+          redirect_uri: options.redirectUri,
+          scope,
+          state,
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+        });
       });
     },
 
     completeLogin(callbackUrl) {
-      const run = chain.then(() => complete(callbackUrl));
-      chain = run.catch(() => undefined);
-      return run;
+      return serial(() => complete(callbackUrl));
     },
   };
 }

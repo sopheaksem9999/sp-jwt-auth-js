@@ -1,4 +1,4 @@
-import { SpAuthError } from '../core/errors';
+import { SpAuthError, sanitizedCause } from '../core/errors';
 import type { Challenge, JwtAuth } from '../core/types';
 
 /** The `mfa(auth)` module surface. */
@@ -34,7 +34,7 @@ export function mfa(auth: JwtAuth): MfaModule {
       try {
         return auth.unwrap(raw);
       } catch (cause) {
-        throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response could not be unwrapped', module: MODULE, cause });
+        throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response could not be unwrapped', module: MODULE, cause: sanitizedCause(cause) });
       }
     },
   };

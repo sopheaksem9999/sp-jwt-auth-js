@@ -1,6 +1,6 @@
 import { decodeClaims } from './claims';
 import type { Claims } from './claims';
-import { SpAuthError, isSpAuthError } from './errors';
+import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import { PACKAGE_REVOKE_PATH, createHttp } from './http';
 import { ANONYMOUS_STATE, authenticatedState, createState } from './state';
 import { ensureDeviceId } from './stores';
@@ -105,15 +105,22 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     endpoint,
     emit,
     extractPair(rawBody: unknown, module?: string): TokenPairRaw {
-      const pair = findTokenPair(unwrap(unwrapMode, rawBody));
-      if (!pair) {
+      // Never `body` or the raw cause on these errors: the rejected response may still hold token values, and loggers print `cause`.
+      let unwrapped: unknown;
+      try {
+        unwrapped = unwrap(unwrapMode, rawBody);
+      } catch (e) {
         throw new SpAuthError({
           status: 0,
           code: 'unknown',
-          message: 'Response did not contain a token pair',
+          message: 'Response could not be unwrapped',
           module,
-          body: rawBody,
+          cause: sanitizedCause(e),
         });
+      }
+      const pair = findTokenPair(unwrapped);
+      if (!pair) {
+        throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not contain a token pair', module });
       }
       return pair;
     },
@@ -350,16 +357,8 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
         }
         const { body: raw, response } = result;
         // Validates the pair before anything is stored: an invalid response keeps the current tokens.
-        // No `body` on the error when the transport is the cookie: a `both`-mode body may carry a refresh token.
-        if (!findTokenPair(unwrap(unwrapMode, raw))) {
-          throw new SpAuthError({
-            status: 0,
-            code: 'unknown',
-            message: 'Response did not contain a token pair',
-            module: 'switchCompany',
-            body: runtime.credentials === 'include' ? null : raw,
-          });
-        }
+        // No `body` on the error in any transport: a rejected response may still carry token values.
+        ctx.extractPair(raw, 'switchCompany');
         await acceptTokens(raw, response);
         const store = runtime.store;
         if (store) {

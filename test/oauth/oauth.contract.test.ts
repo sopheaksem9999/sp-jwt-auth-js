@@ -53,18 +53,16 @@ describe.skipIf(mode !== 'live' && !hasFixtures)('oauth contract (sp-jwt-test)',
     }
   });
 
-  // UNVERIFIED-CONTRACT: with oauth_server off the routes 404.
-  it('module disabled: the routes answer 404 -> module_disabled', async () => {
-    const auth = client();
+  // UNVERIFIED-CONTRACT: the disabled backend is reached through SP_CONTRACT_OAUTH_DISABLED (the introspect route of a host with
+  // oauth_server off, e.g. /oauth-disabled/introspect). Skipped, not silently passing, unless that is set.
+  it.skipIf(!process.env.SP_CONTRACT_OAUTH_DISABLED)('with oauth_server disabled, the routes answer module_disabled', async () => {
+    const auth = client({ oauthIntrospect: process.env.SP_CONTRACT_OAUTH_DISABLED ?? '' });
     try {
-      const e = await oauth(auth, { clientId, clientSecret })
+      const err = await oauth(auth, { clientId, clientSecret })
         .introspect('x')
-        .then(
-          () => null,
-          (err: unknown) => err,
-        );
-      // Only meaningful against a backend with oauth_server off; otherwise this documents the shape.
-      if (e instanceof SpAuthError && e.code === 'module_disabled') expect(e.module).toBe('oauth');
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SpAuthError);
+      expect(err).toMatchObject({ code: 'module_disabled', module: 'oauth' });
     } finally {
       auth.dispose?.();
     }

@@ -1,4 +1,4 @@
-import { SpAuthError, isSpAuthError } from './errors';
+import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import type { BroadcastToken, CrossTab } from './crosstab';
 import type { TokenStore, Tokens } from './stores';
 import type { ModeContext } from './types';
@@ -75,7 +75,7 @@ export function sessionEndedError(status: number, cause?: unknown): SpAuthError 
     code: 'session_ended',
     message: 'The session has ended',
     module: 'refresh',
-    cause,
+    cause: sanitizedCause(cause),
   });
 }
 

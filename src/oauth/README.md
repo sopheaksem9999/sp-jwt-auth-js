@@ -23,12 +23,27 @@ location.assign(await oauthMode.beginLogin());   // 1. redirect to the host
 await oauthMode.completeLogin(location.href);     // 2. on the callback page
 ```
 
-The app holds the returned mode object; `beginLogin` / `completeLogin` are bound to the client created with it (before that they reject `not_configured`). Tokens are held by an inner `userSession` (`session` takes its options, including `transport: 'cookie'`), so refresh, storage, cross-tab behaviour and `getState()` are exactly those of a user session.
+The app holds the returned mode object; `beginLogin` / `completeLogin` are bound to the client created with it (before that they reject `not_configured`). **One mode per client**: passing the same mode to a second `createJwtAuth` throws `not_configured` unless the first client was `dispose()`d. Tokens are held by an inner `userSession` (`session` takes its options, including `transport: 'cookie'`), so refresh, storage, cross-tab behaviour and `getState()` are exactly those of a user session.
 
-- `beginLogin()` generates `state` (256 random bits, base64url) and a PKCE verifier (64 characters), stores `{ state, verifier }` in the `pendingStore` (default: `sessionStorage`, feature-detected and guarded, with a memory copy) and returns `authorizeUrl` plus `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `code_challenge_method=S256`. An existing query string on `authorizeUrl` is kept.
+- `beginLogin()` generates `state` (256 random bits, base64url) and a PKCE verifier (64 characters), stores `{ [state]: { verifier, createdAt } }` in the `pendingStore` (default: `sessionStorage` under `sp-jwt-auth:oauth:pending:<clientId>`, feature-detected and guarded, with a memory copy) and returns `authorizeUrl` plus `response_type=code`, `client_id`, `redirect_uri`, `scope`, `state`, `code_challenge`, `code_challenge_method=S256`. An existing query string on `authorizeUrl` is kept.
 - `completeLogin(callbackUrl)` reads `code`, `state` and `error` / `error_description` from the **query string**, compares `state` with the pending record, then POSTs `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id`, `code_verifier` (form-encoded) to `tokenUrl` (default `endpoints.oauthToken`, `/oauth/token`) with the device headers when the `device` option is set (and credentials `include` in cookie transport). The response goes through the same path as a login (`acceptTokens`): body transport stores the pair, cookie transport keeps the refresh token in the httpOnly cookie and stores none.
-- **The pending record is single use.** It is cleared as soon as it is read, on success, on failure and on a state mismatch, so replaying a callback URL is rejected (`invalid_state`); two simultaneous completions of one URL exchange the code once. A newer `beginLogin` replaces an unfinished one.
-- Nothing is stored on any failure. The code, verifier, state and secret never appear in thrown errors, events or `getState()`.
+- **Each pending login is single use.** Logins are keyed by `state`, so two started in one tab do not cancel each other. `completeLogin` consumes exactly the entry for the callback's `state` on every outcome (success, callback error, failed exchange), so replaying a callback URL is rejected (`invalid_state`); two simultaneous completions of one URL exchange the code once. A callback with an unknown `state` consumes nothing (a forged callback cannot cancel a real login). Entries older than 10 minutes are pruned on read (at most 20 are kept). A custom `pendingStore` whose `set` throws would leave the entry replayable: make `set` reliable.
+- Nothing is stored on any failure. The code, verifier, state, secret and token values never appear in thrown errors (including `cause`, which is reduced to a name/status/code copy), events or `getState()`. An invalid token pair throws `unknown` with no `body`.
+- The callback `error` is surfaced as the `code` only when it is a well-formed RFC 6749 §5.2 value (printable ASCII without `"` and `\`, at most 64 characters); otherwise `invalid_request`, without echoing it.
+
+### On a server
+
+Create **one mode per user or request**, with a `pendingStore` backed by that user's server session (never a store shared between users: the default on a server is a single in-memory slot, so one user's `beginLogin` would be visible to another):
+
+```ts
+app.get('/login', async (req, res) => {
+  const mode = oauthAuthorizationCode({ clientId, clientSecret, redirectUri, scope, authorizeUrl, pendingStore: sessionPendingStore(req.session) });
+  createJwtAuth({ baseUrl, endpoints: {}, mode });
+  res.redirect(await mode.beginLogin());
+});
+```
+
+A module-level mode shared by requests is refused on the second `createJwtAuth`.
 
 ### Always S256
 
@@ -42,13 +57,13 @@ The backend defaults an omitted `code_challenge_method` to **`plain`** when a ch
 
 | Situation | `code` |
 |---|---|
-| callback carries `error=…` | that value (`access_denied`, …); `error_description` becomes the message |
+| callback carries `error=…` | that value (`access_denied`, …) when well-formed, else `invalid_request`; a well-formed `error_description` becomes the message |
 | `state` missing, different, or no pending login (incl. a replay) | `invalid_state` |
 | callback without `code` | `invalid_request` |
 | token endpoint 400 / 401 | the RFC 6749 `error` (`invalid_grant`, `invalid_client`, `invalid_scope`, `unsupported_grant_type`, `invalid_request`) |
 | 404 | `module_disabled` |
 | 2xx without a token pair, or a throwing `unwrap` | `unknown` (fixed message, no body) |
-| `beginLogin` / `completeLogin` before the mode is given to `createJwtAuth` | `not_configured` |
+| `beginLogin` / `completeLogin` before the mode is given to `createJwtAuth`; the mode given to a second live client | `not_configured` |
 | network / timeout | `network` / `timeout` |
 
 ## Introspection and revocation (`oauth(auth, creds)`)

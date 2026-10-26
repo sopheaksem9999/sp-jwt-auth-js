@@ -65,6 +65,24 @@ export class SpAuthError extends Error {
   }
 }
 
+/**
+ * A copy of an underlying error that is safe to attach as `cause`: it keeps the
+ * error's `name` (and, for an `SpAuthError`, `status` and `code`) and nothing
+ * else. Response bodies, `response`, messages and custom properties (a
+ * parser's or `jose`'s payload, a thrown host value) are dropped, because
+ * loggers print `cause` recursively and those can hold tokens, codes or secrets.
+ * Never attach a raw error from reading a response as `cause`.
+ */
+export function sanitizedCause(e: unknown): Error | undefined {
+  if (e === undefined || e === null) return undefined;
+  if (e instanceof SpAuthError) {
+    return new SpAuthError({ status: e.status, code: e.code, message: 'Underlying error details omitted', module: e.module });
+  }
+  const copy = new Error('Underlying error details omitted');
+  copy.name = e instanceof Error && typeof e.name === 'string' ? e.name : 'Error';
+  return copy;
+}
+
 /** Type guard for `SpAuthError`. */
 export function isSpAuthError(e: unknown): e is SpAuthError {
   return e instanceof SpAuthError;

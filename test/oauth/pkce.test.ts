@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { generateCodeVerifier, pkceChallenge } from '../../src/oauth';
 
 describe('pkceChallenge', () => {
@@ -42,5 +42,21 @@ describe('generateCodeVerifier', () => {
     // Expected 1/66 each (~388 of 25600); a modulo-biased sampler would put some characters near double.
     for (const n of seen.values()) expect(n / total).toBeLessThan(0.025);
     expect(generateCodeVerifier()).not.toBe(generateCodeVerifier());
+  });
+
+  it('discards bytes at or above 198 (the largest multiple of 66 in a byte) instead of folding them with modulo', () => {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    // Even positions are rejected bytes (>= 198), odd positions are accepted bytes 0, 1, 2, ...
+    const spy = vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation(((buf: Uint8Array) => {
+      for (let i = 0; i < buf.length; i++) buf[i] = i % 2 === 0 ? 198 + (i % 58) : (i >> 1) % 198;
+      return buf;
+    }) as typeof globalThis.crypto.getRandomValues);
+    try {
+      const v = generateCodeVerifier(128);
+      const expected = Array.from({ length: 128 }, (_, k) => alphabet[k % 198 % 66]).join('');
+      expect(v).toBe(expected);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

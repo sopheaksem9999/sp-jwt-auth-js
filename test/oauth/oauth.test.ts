@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createJwtAuth, memoryStore, SpAuthError, userSession } from '../../src';
 import type { AuthEvent, JwtAuth, TokenStore, Unwrap } from '../../src';
 import { oauth, oauthAuthorizationCode } from '../../src/oauth';
-import type { PendingLogin, PendingStore } from '../../src/oauth';
+import type { PendingLogins, PendingStore } from '../../src/oauth';
+import { otp } from '../../src/otp';
 
 function b64url(s: string): string {
   let bin = '';
@@ -49,18 +50,26 @@ function makeFetch(handler: Handler, calls: Call[]): typeof fetch {
 
 const tokenOk = (): Response => json({ access_token: ACCESS, refresh_token: REFRESH, expires_in: 900, token_type: 'Bearer' });
 
-function memPending(): PendingStore & { current: PendingLogin | null; history: (PendingLogin | null)[] } {
+function memPending(): PendingStore & { current: PendingLogins | null; history: (PendingLogins | null)[] } {
   const s = {
-    current: null as PendingLogin | null,
-    history: [] as (PendingLogin | null)[],
+    current: null as PendingLogins | null,
+    history: [] as (PendingLogins | null)[],
     get: () => Promise.resolve(s.current),
-    set: (v: PendingLogin | null) => {
-      s.current = v;
-      s.history.push(v);
+    set: (v: PendingLogins | null) => {
+      s.current = v === null ? null : JSON.parse(JSON.stringify(v));
+      s.history.push(s.current);
       return Promise.resolve();
     },
   };
   return s;
+}
+
+/** The only pending login: `{ state, verifier }`. */
+function only(p: { current: PendingLogins | null }): { state: string; verifier: string } {
+  const entries = Object.entries(p.current ?? {});
+  expect(entries).toHaveLength(1);
+  const [state, e] = entries[0] ?? ['', { verifier: '' }];
+  return { state, verifier: e.verifier };
 }
 
 interface Setup {
@@ -151,10 +160,10 @@ describe('oauthAuthorizationCode.beginLogin', () => {
     const s = setup();
     const url = await s.mode.beginLogin();
     const { pkceChallenge } = await import('../../src/oauth');
-    expect(s.pending.current).not.toBeNull();
-    expect(s.pending.current?.state).toBe(params(url).get('state'));
-    expect(await pkceChallenge(s.pending.current?.verifier ?? '')).toBe(params(url).get('code_challenge'));
-    expect(s.pending.current?.verifier).toMatch(/^[A-Za-z0-9\-._~]{43,128}$/);
+    const rec = only(s.pending);
+    expect(rec.state).toBe(params(url).get('state'));
+    expect(await pkceChallenge(rec.verifier)).toBe(params(url).get('code_challenge'));
+    expect(rec.verifier).toMatch(/^[A-Za-z0-9\-._~]{43,128}$/);
   });
 
   it('preserves an existing query string, encodes values, joins an array scope, and is fresh each time', async () => {
@@ -188,7 +197,7 @@ describe('oauthAuthorizationCode.completeLogin', () => {
   it('exchanges the code with the stored verifier at the default token route, stores the pair and flips state', async () => {
     const s = setup();
     const state = params(await s.mode.beginLogin()).get('state') ?? '';
-    const verifier = s.pending.current?.verifier ?? '';
+    const verifier = only(s.pending).verifier;
     expect(s.auth.getState().status).not.toBe('authenticated');
     await s.auth.ready();
     await s.mode.completeLogin(callback(state));
@@ -247,24 +256,23 @@ describe('oauthAuthorizationCode.completeLogin', () => {
     expect(s.auth.getState().status).toBe('authenticated');
   });
 
-  it('rejects a state mismatch without a request, and clears the pending record', async () => {
+  it('rejects a state mismatch without a request and leaves other pending logins untouched', async () => {
     const s = setup();
     await s.mode.beginLogin();
     const e = await caught(s.mode.completeLogin(callback('not-the-state')));
     expect(e.code).toBe('invalid_state');
     expect(s.calls).toHaveLength(0);
-    expect(s.pending.current).toBeNull();
+    expect(Object.keys(s.pending.current ?? {})).toHaveLength(1); // a forged callback cannot cancel a real login
     expect((await s.store.get())?.accessToken).toBeUndefined();
   });
 
-  it('rejects a missing state, a missing code, and no pending login', async () => {
+  it('rejects a missing state, a missing code (consuming that login), and no pending login', async () => {
     const s = setup();
     await s.mode.beginLogin();
     expect((await caught(s.mode.completeLogin(`https://app.example.com/cb?code=${CODE}`))).code).toBe('invalid_state');
-    expect(s.pending.current).toBeNull();
-    // no pending record at all
+    // no pending record for this state
     expect((await caught(s.mode.completeLogin(callback('whatever')))).code).toBe('invalid_state');
-    const state = params(await s.mode.beginLogin()).get('state') ?? '';
+    const state = only(s.pending).state;
     expect((await caught(s.mode.completeLogin(`https://app.example.com/cb?state=${state}`))).code).toBe('invalid_request');
     expect(s.pending.current).toBeNull();
     expect(s.calls).toHaveLength(0);
@@ -350,7 +358,7 @@ describe('oauthAuthorizationCode.completeLogin', () => {
   it('secrets hygiene: errors, events and state never carry code, verifier, state, secret or tokens', async () => {
     const s = setup(() => json({ error: 'invalid_client', error_description: 'bad client' }, 401), { clientSecret: SECRET });
     const state = params(await s.mode.beginLogin()).get('state') ?? '';
-    const verifier = s.pending.current?.verifier ?? '';
+    const verifier = only(s.pending).verifier;
     const e = await caught(s.mode.completeLogin(callback(state)));
     expect(e.code).toBe('invalid_client');
     const dump = JSON.stringify([e.message, e.body, e.code, s.events, s.auth.getState()]);
@@ -358,10 +366,239 @@ describe('oauthAuthorizationCode.completeLogin', () => {
 
     const ok = setup(undefined, { clientSecret: SECRET });
     const st = params(await ok.mode.beginLogin()).get('state') ?? '';
-    const v = ok.pending.history[0]?.verifier ?? '';
+    const v = Object.values(ok.pending.history[0] ?? {})[0]?.verifier ?? '';
     await ok.mode.completeLogin(callback(st));
     const dump2 = JSON.stringify([ok.events, ok.auth.getState()]);
     for (const secret of [SECRET, CODE, v, st, REFRESH, ACCESS]) expect(dump2).not.toContain(secret);
+  });
+});
+
+describe('one mode per client', () => {
+  const mk = (): ReturnType<typeof oauthAuthorizationCode> =>
+    oauthAuthorizationCode({
+      clientId: 'app-1',
+      redirectUri: 'https://app.example.com/cb',
+      scope: 's',
+      authorizeUrl: 'https://api.example.com/oauth/authorize',
+      pendingStore: memPending(),
+      session: { crossTab: false, storage: memoryStore() },
+    });
+  const attach = (mode: ReturnType<typeof oauthAuthorizationCode>): JwtAuth =>
+    createJwtAuth({ baseUrl: 'https://api.example.com', endpoints: {}, mode, fetch: makeFetch(() => tokenOk(), []) });
+
+  it('a second createJwtAuth with the same mode throws not_configured and the first client stays bound', async () => {
+    const mode = mk();
+    attach(mode);
+    let err: unknown;
+    try {
+      attach(mode);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SpAuthError);
+    expect((err as SpAuthError).code).toBe('not_configured');
+    expect((err as SpAuthError).module).toBe('oauth');
+    expect((err as SpAuthError).message).toContain('already attached to a client');
+    expect(await mode.beginLogin()).toContain('code_challenge_method=S256');
+  });
+
+  it('after the first client is disposed, the mode can be attached again', async () => {
+    const mode = mk();
+    const first = attach(mode);
+    first.dispose?.();
+    const second = attach(mode);
+    const state = params(await mode.beginLogin()).get('state') ?? '';
+    await mode.completeLogin(callback(state));
+    expect(second.getState().status).toBe('authenticated');
+    expect(first.getState().status).not.toBe('authenticated');
+  });
+});
+
+describe('pending logins', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('two interleaved beginLogin flows both complete', async () => {
+    const s = setup();
+    const a = params(await s.mode.beginLogin()).get('state') ?? '';
+    const b = params(await s.mode.beginLogin()).get('state') ?? '';
+    expect(a).not.toBe(b);
+    expect(Object.keys(s.pending.current ?? {}).sort()).toEqual([a, b].sort());
+    const verA = s.pending.current?.[a]?.verifier ?? '';
+    const verB = s.pending.current?.[b]?.verifier ?? '';
+    await s.mode.completeLogin(callback(b));
+    expect(new URLSearchParams(s.calls[0]?.body).get('code_verifier')).toBe(verB);
+    expect(Object.keys(s.pending.current ?? {})).toEqual([a]);
+    await s.mode.completeLogin(callback(a));
+    expect(new URLSearchParams(s.calls[1]?.body).get('code_verifier')).toBe(verA);
+    expect(s.pending.current).toBeNull();
+    // replays still rejected
+    expect((await caught(s.mode.completeLogin(callback(a)))).code).toBe('invalid_state');
+    expect((await caught(s.mode.completeLogin(callback(b)))).code).toBe('invalid_state');
+    expect(s.calls).toHaveLength(2);
+  });
+
+  it('concurrent beginLogin calls do not lose records', async () => {
+    const s = setup();
+    const urls = await Promise.all([s.mode.beginLogin(), s.mode.beginLogin(), s.mode.beginLogin()]);
+    expect(Object.keys(s.pending.current ?? {}).sort()).toEqual(urls.map((u) => params(u).get('state') ?? '').sort());
+  });
+
+  it('prunes entries older than 10 minutes on read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    const s = setup();
+    const old = params(await s.mode.beginLogin()).get('state') ?? '';
+    vi.setSystemTime(new Date('2030-01-01T00:09:59Z'));
+    const fresh = params(await s.mode.beginLogin()).get('state') ?? '';
+    expect(Object.keys(s.pending.current ?? {}).sort()).toEqual([old, fresh].sort());
+    vi.setSystemTime(new Date('2030-01-01T00:10:01Z')); // `old` is now 601 s old
+    expect((await caught(s.mode.completeLogin(callback(old)))).code).toBe('invalid_state');
+    expect(s.calls).toHaveLength(0);
+    expect(Object.keys(s.pending.current ?? {})).toEqual([fresh]);
+    await s.mode.completeLogin(callback(fresh));
+    expect(s.calls).toHaveLength(1);
+  });
+
+  it('the default store key is namespaced by clientId', async () => {
+    const data = new Map<string, string>();
+    const fake = {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => void data.set(k, v),
+      removeItem: (k: string) => void data.delete(k),
+    };
+    const g = globalThis as Record<string, unknown>;
+    const had = Object.getOwnPropertyDescriptor(g, 'sessionStorage');
+    Object.defineProperty(g, 'sessionStorage', { value: fake, configurable: true, writable: true });
+    try {
+      const mode = oauthAuthorizationCode({
+        clientId: 'client-xyz',
+        redirectUri: 'https://app.example.com/cb',
+        scope: 's',
+        authorizeUrl: 'https://api.example.com/oauth/authorize',
+        session: { crossTab: false, storage: memoryStore() },
+      });
+      createJwtAuth({ baseUrl: 'https://api.example.com', endpoints: {}, mode, fetch: makeFetch(() => tokenOk(), []) });
+      await mode.beginLogin();
+      expect([...data.keys()]).toEqual(['sp-jwt-auth:oauth:pending:client-xyz']);
+    } finally {
+      if (had) Object.defineProperty(g, 'sessionStorage', had);
+      else delete g.sessionStorage;
+    }
+  });
+});
+
+describe('callback error value', () => {
+  it.each([
+    ['too long', 'a'.repeat(65)],
+    ['control characters', 'bad\u0001code'],
+    ['a quote', 'say"hi'],
+    ['a backslash', 'back\\slash'],
+    ['non-ASCII', 'caf\u00e9'],
+  ])('rejects an error value with %s as invalid_request without echoing it', async (_n, bad) => {
+    const s = setup();
+    const state = params(await s.mode.beginLogin()).get('state') ?? '';
+    const e = await caught(s.mode.completeLogin(callback(state, { error: bad })));
+    expect(e.code).toBe('invalid_request');
+    expect(e.message).not.toContain(bad);
+    expect(s.pending.current).toBeNull();
+  });
+
+  it('accepts a 64 character code and ignores an invalid description', async () => {
+    const s = setup();
+    const state = params(await s.mode.beginLogin()).get('state') ?? '';
+    const code = 'e'.repeat(64);
+    const e = await caught(s.mode.completeLogin(callback(state, { error: code, error_description: '<script>' + '\u0001' })));
+    expect(e.code).toBe(code);
+    expect(e.message).toBe(`Authorization failed: ${code}`);
+  });
+});
+
+/** Everything printable about an error, including every `cause` level (an `inspect`-style dump without node:). */
+function dumpError(e: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  const walk = (v: unknown): void => {
+    if (v === null || v === undefined || seen.has(v)) return;
+    seen.add(v);
+    if (typeof v === 'object') {
+      try {
+        parts.push(JSON.stringify(v, Object.getOwnPropertyNames(v)));
+      } catch {
+        /* cyclic or unserialisable */
+      }
+      const o = v as { cause?: unknown; body?: unknown };
+      if (o.body !== undefined) parts.push(JSON.stringify(o.body) ?? '');
+      walk(o.cause);
+    } else parts.push(String(v));
+    if (v instanceof Error) parts.push(`${v.name}: ${v.message}`);
+  };
+  walk(e);
+  return parts.join('\n');
+}
+
+describe('invalid token pairs never leak through body or cause', () => {
+  const LEAK_RT = 'leak-refresh-token-7f3a9c';
+  const LEAK_AT = 'leak-access-token-5d1e2b';
+  // access_token present but `expires_in` is a string: rejected by the pair check, yet it holds live token values.
+  const badPair = (): Response => json({ access_token: LEAK_AT, refresh_token: LEAK_RT, expires_in: 'soon' });
+
+  it('core acceptTokens (body transport) throws unknown without body or sensitive cause', async () => {
+    const s = osetup(() => json({}));
+    let err: unknown;
+    try {
+      await s.auth.acceptTokens(await badPair().json());
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SpAuthError);
+    expect((err as SpAuthError).code).toBe('unknown');
+    expect((err as SpAuthError).body).toBeNull();
+    expect(dumpError(err)).not.toContain(LEAK_RT);
+    expect(dumpError(err)).not.toContain(LEAK_AT);
+  });
+
+  it('core acceptTokens with a throwing unwrap carries only a sanitised cause', async () => {
+    const s = osetup(() => json({}), {
+      unwrap: () => {
+        throw Object.assign(new Error(`boom ${LEAK_RT}`), { payload: { t: LEAK_AT } });
+      },
+    });
+    let err: unknown;
+    try {
+      await s.auth.acceptTokens({ x: 1 });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as SpAuthError).code).toBe('unknown');
+    expect(dumpError(err)).not.toContain(LEAK_RT);
+    expect(dumpError(err)).not.toContain(LEAK_AT);
+  });
+
+  it('oauth completeLogin', async () => {
+    const s = setup(badPair);
+    const state = params(await s.mode.beginLogin()).get('state') ?? '';
+    const e = await caught(s.mode.completeLogin(callback(state)));
+    expect(e.code).toBe('unknown');
+    expect(e.body).toBeNull();
+    expect(dumpError(e)).not.toContain(LEAK_RT);
+    expect(dumpError(e)).not.toContain(LEAK_AT);
+    expect((await s.store.get())?.accessToken).toBeUndefined();
+  });
+
+  it('otp verify', async () => {
+    const s = osetup(badPair);
+    let err: unknown;
+    try {
+      await otp(s.auth).verify({ otp_id: 'o-1', code: '123456' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SpAuthError);
+    expect((err as SpAuthError).code).toBe('unknown');
+    expect(dumpError(err)).not.toContain(LEAK_RT);
+    expect(dumpError(err)).not.toContain(LEAK_AT);
   });
 });
 

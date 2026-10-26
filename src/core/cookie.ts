@@ -1,7 +1,7 @@
 import { decodeClaims } from './claims';
 import { resolveSessionCrossTab } from './crosstab';
 import type { BroadcastToken, TabMessage } from './crosstab';
-import { SpAuthError, isSpAuthError } from './errors';
+import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import { PACKAGE_REVOKE_PATH, bearerFrom } from './http';
 import { createRefresher, isSessionEnded, sessionEndedError, waitFor } from './refresh';
 import type { TokenStore, Tokens } from './stores';
@@ -310,7 +310,7 @@ export function cookieSession(options: UserSessionOptions, store: TokenStore): A
           requestId: e.requestId,
           body: e.body,
           response: e.response,
-          cause: e,
+          cause: sanitizedCause(e),
         });
       };
 

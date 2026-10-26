@@ -3,7 +3,7 @@ import { createLocalJWKSet, errors, jwtVerify } from 'jose';
 import type { JSONWebKeySet, JWTVerifyGetKey } from 'jose';
 import { decodeClaims } from '../core/claims';
 import type { Claims } from '../core/claims';
-import { SpAuthError } from '../core/errors';
+import { SpAuthError, sanitizedCause } from '../core/errors';
 
 /** Options for `createVerifier`. */
 export interface VerifierOptions {
@@ -33,11 +33,11 @@ export interface VerifierOptions {
 const ALLOWED_ALGORITHMS = ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'];
 
 function invalidToken(message: string, cause?: unknown): SpAuthError {
-  return new SpAuthError({ status: 0, code: 'invalid_token', message, module: 'verify', cause });
+  return new SpAuthError({ status: 0, code: 'invalid_token', message, module: 'verify', cause: sanitizedCause(cause) });
 }
 
 function networkError(message: string, cause?: unknown): SpAuthError {
-  return new SpAuthError({ status: 0, code: 'network', message, module: 'verify', cause });
+  return new SpAuthError({ status: 0, code: 'network', message, module: 'verify', cause: sanitizedCause(cause) });
 }
 
 function duration(value: number | undefined, fallback: number, name: string): number {
