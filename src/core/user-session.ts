@@ -49,7 +49,7 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
 }
 
 /** Token from an `Authorization: Bearer …` header (header name and scheme case-insensitive), or `null`. */
-function bearerFrom(headers: Record<string, string> | undefined): string | null {
+export function bearerFrom(headers: Record<string, string> | undefined): string | null {
   if (!headers) return null;
   for (const [k, v] of Object.entries(headers)) {
     if (k.toLowerCase() !== 'authorization') continue;

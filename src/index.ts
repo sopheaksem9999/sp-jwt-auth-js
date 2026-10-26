@@ -15,6 +15,8 @@ export { createCrossTab } from './core/crosstab';
 export type { CrossTab, CrossTabDeps, LockManagerLike, TabMessage } from './core/crosstab';
 export { presets } from './core/presets';
 export { createJwtAuth, userSession } from './core/create-jwt-auth';
+export { apiKey, clientCredentials, staticToken } from './core/modes';
+export type { ClientCredentialsOptions } from './core/modes';
 export type {
   AuthEvent,
   AuthMode,

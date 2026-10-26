@@ -7,6 +7,11 @@ export interface HttpRequest {
   endpoint: string;
   /** Sent as JSON (with `Content-Type: application/json`) when not `undefined`. */
   body?: unknown;
+  /**
+   * Sent as `application/x-www-form-urlencoded` (OAuth token requests). Mutually
+   * exclusive with `body`; when both are set, `form` wins.
+   */
+  form?: Record<string, string>;
   /** Adds the mode's auth headers (`Authorization: Bearer …`). */
   bearer?: boolean;
   /**
@@ -87,7 +92,8 @@ export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<Htt
     // A path is joined to baseUrl, so only an absolute endpoint can leave baseUrl's origin.
     const deviceAllowed = !ABSOLUTE_URL.test(req.endpoint) || sameOrigin(deps.baseUrl, url);
     if (req.device === true && deviceAllowed) Object.assign(headers, await deps.deviceHeaders());
-    if (req.body !== undefined) headers['Content-Type'] = 'application/json';
+    if (req.form !== undefined) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    else if (req.body !== undefined) headers['Content-Type'] = 'application/json';
     if (req.bearer === true) Object.assign(headers, await deps.authHeaders());
     Object.assign(headers, req.headers ?? {});
 
@@ -107,7 +113,8 @@ export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<Htt
     let text: string;
     try {
       const init: RequestInit = { method: req.method, headers, signal: controller.signal };
-      if (req.body !== undefined) init.body = JSON.stringify(req.body);
+      if (req.form !== undefined) init.body = new URLSearchParams(req.form).toString();
+      else if (req.body !== undefined) init.body = JSON.stringify(req.body);
       if (req.credentials !== undefined) init.credentials = req.credentials;
       try {
         response = await doFetch(url, init);
