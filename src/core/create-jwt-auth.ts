@@ -389,6 +389,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
       return t === undefined ? state.get().claims : decodeClaims(t);
     },
 
+    baseUrl: o.baseUrl,
     credentials: runtime.credentials,
     unwrap: (body) => unwrap(unwrapMode, body),
     http,

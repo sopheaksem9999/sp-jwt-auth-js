@@ -8,6 +8,9 @@ export default defineConfig({
     otp: 'src/otp/index.ts',
     mfa: 'src/mfa/index.ts',
     oauth: 'src/oauth/index.ts',
+    sessions: 'src/sessions/index.ts',
+    account: 'src/account/index.ts',
+    social: 'src/social/index.ts',
   },
   // `jose` is an optional peer dependency: never bundle it (it is also in peerDependencies, which tsup externalises).
   external: ['jose'],

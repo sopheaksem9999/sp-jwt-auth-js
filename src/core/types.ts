@@ -286,6 +286,8 @@ export interface JwtAuth {
    * option (including a function) to a raw response body.
    */
   unwrap(body: unknown): unknown;
+  /** @internal Module surface: the `baseUrl` option, for modules that build absolute URLs (`social.redirectUrl`). */
+  readonly baseUrl: string;
   /** Module surface: request helper. */
   http<T>(o: HttpRequest): Promise<HttpResult<T>>;
   /** Module surface: endpoint path; throws `SpAuthError('not_configured', module)` when unset. */

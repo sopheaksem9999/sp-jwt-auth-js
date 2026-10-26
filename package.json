@@ -25,6 +25,15 @@
       ],
       "oauth": [
         "./dist/oauth.d.ts"
+      ],
+      "sessions": [
+        "./dist/sessions.d.ts"
+      ],
+      "account": [
+        "./dist/account.d.ts"
+      ],
+      "social": [
+        "./dist/social.d.ts"
       ]
     }
   },
@@ -77,6 +86,36 @@
       "require": {
         "types": "./dist/oauth.d.cts",
         "default": "./dist/oauth.cjs"
+      }
+    },
+    "./sessions": {
+      "import": {
+        "types": "./dist/sessions.d.ts",
+        "default": "./dist/sessions.js"
+      },
+      "require": {
+        "types": "./dist/sessions.d.cts",
+        "default": "./dist/sessions.cjs"
+      }
+    },
+    "./account": {
+      "import": {
+        "types": "./dist/account.d.ts",
+        "default": "./dist/account.js"
+      },
+      "require": {
+        "types": "./dist/account.d.cts",
+        "default": "./dist/account.cjs"
+      }
+    },
+    "./social": {
+      "import": {
+        "types": "./dist/social.d.ts",
+        "default": "./dist/social.js"
+      },
+      "require": {
+        "types": "./dist/social.d.cts",
+        "default": "./dist/social.cjs"
       }
     }
   },

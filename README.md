@@ -320,7 +320,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 
 ## Modules
 
-Each module is a function that takes the core auth object. **The core (session, cookie transport and the server modes), `verify`, `otp` and `mfa` ship in 0.1**; the rest are coming in later releases.
+Each module is a function that takes the core auth object. **The core (session, cookie transport and the server modes), `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social` ship in 0.1**; the rest are coming in later releases.
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
@@ -329,11 +329,11 @@ Each module is a function that takes the core auth object. **The core (session, 
 | (server tokens) | `@sopheak/sp-jwt-auth` (core) | `staticToken()` mode | **0.1** |
 | `first_factor_otp` | `@sopheak/sp-jwt-auth/otp` | `otp(auth)` | **0.1** |
 | `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | **0.1** |
-| Sessions | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)` | coming later |
+| Sessions (`activeSessionsForUser`, `revokeSession`, `revokeAllForUser`, `revokeDevice`) | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)`: `list`, `revoke`, `revokeOthers`, `revokeDevice` | **0.1** |
 | `oauth_server` | `@sopheak/sp-jwt-auth` (core) | `clientCredentials()` mode | **0.1** |
 | `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode (PKCE S256), `introspect`, `revoke` | **0.1** |
-| `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)` | coming later |
-| `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)` | coming later |
+| `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)`: `redirectUrl`, `completeFromCallback` | **0.1** |
+| `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)`: `forgotPassword`, `resetPassword`, `resendVerification`, `verifyEmail` | **0.1** |
 | `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
 
 ### First-factor OTP (`otp`)
@@ -361,6 +361,45 @@ if (result.status === 'second_factor_required') {
 ```
 
 `endpoints.secondFactorResend` is a host route; when unset the call throws `not_configured` (module `mfa`). Details: [`src/mfa/README.md`](src/mfa/README.md).
+
+### Sessions (`sessions`)
+
+```ts
+import { sessions } from '@sopheak/sp-jwt-auth/sessions';
+
+const s = sessions(auth); // options: { method?: 'DELETE' | 'POST', revokeOthersBody?: (sid) => body }
+const list = await s.list();            // GET endpoints.sessions; the entry whose id equals the JWT `sid` has current: true
+await s.revoke(list[1].id);             // endpoints.sessionRevoke, ':sid' replaced (encoded); DELETE unless method: 'POST'
+await s.revokeOthers();                 // POST endpoints.sessionRevokeOthers with { except_sid: <current sid> }
+await s.revokeDevice('device-id');      // endpoints.deviceRevoke, ':deviceId' replaced (encoded)
+```
+
+The package has no session routes: they are host routes you configure under `endpoints`. Revoking the current session clears the local session. `revokeOthers()` throws `not_configured` ("no current session id") without a request when the token has no `sid`. The `{ except_sid }` body is this client's default, not part of the backend; override it with `revokeOthersBody`. Details: [`src/sessions/README.md`](src/sessions/README.md).
+
+### Account (`account`)
+
+```ts
+import { account } from '@sopheak/sp-jwt-auth/account';
+
+await account(auth).forgotPassword({ email });
+await account(auth).resetPassword({ token, email, password, password_confirmation }); // success clears the local session
+await account(auth).resendVerification();
+await account(auth).verifyEmail({ id, hash, expires, signature });
+```
+
+Host routes (`endpoints.forgotPassword`, `resetPassword`, `resendVerification`, `verifyEmail`). The backend does not revoke sessions on a password reset: call `revokeAllForUser` in your reset route. Details: [`src/account/README.md`](src/account/README.md).
+
+### Social login (`social`)
+
+```ts
+import { social } from '@sopheak/sp-jwt-auth/social';
+
+location.href = social(auth).redirectUrl('google'); // baseUrl + endpoints.socialRedirect, ':provider' replaced
+// on the callback page:
+await social(auth).completeFromCallback('google', { code, state }); // POSTs endpoints.socialCallback, stores the pair
+```
+
+Host routes. There is no OIDC support: the package has no ID tokens, userinfo or discovery. Details: [`src/social/README.md`](src/social/README.md).
 
 ## Backend compatibility
 
