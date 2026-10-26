@@ -12,7 +12,7 @@ if (result.status === 'second_factor_required') {
 }
 ```
 
-`mfa(auth).resend(challenge)` POSTs to `endpoints.secondFactorResend`, unauthenticated, with `{ '2fa_token': token }` (challenge kind `'2fa_token'`) or `{ challenge_id: token }` (kind `'challenge_id'`), and returns the response body as is (no unwrap, no token handling).
+`mfa(auth).resend(challenge)` POSTs to `endpoints.secondFactorResend`, unauthenticated, with `{ '2fa_token': token }` (challenge kind `'2fa_token'`) or `{ challenge_id: token }` (kind `'challenge_id'`), and returns the response body unwrapped per the client's `unwrap` option (no token handling).
 
 ## Errors (`SpAuthError`, `module: 'mfa'`)
 

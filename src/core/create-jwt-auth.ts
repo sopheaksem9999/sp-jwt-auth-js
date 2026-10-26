@@ -391,6 +391,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
     },
 
     credentials: runtime.credentials,
+    unwrap: (body) => unwrap(unwrapMode, body),
     http,
     endpoint,
     acceptTokens,

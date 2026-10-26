@@ -38,7 +38,7 @@ describe.skipIf(mode !== 'live' && !hasFixtures)('otp contract (sp-jwt-test)', (
   });
 
   it('with first_factor_otp disabled, the routes answer module_disabled', async () => {
-    // UNVERIFIED-CONTRACT: the disabled backend is reached through ?case=otp-disabled on the prefix (ignored by a live host).
+    // UNVERIFIED-CONTRACT: the disabled backend is reached by swapping the `endpoints.otp` prefix (SP_CONTRACT_OTP_DISABLED_PREFIX, default /otp-disabled).
     const auth = client({ otp: `${process.env.SP_CONTRACT_OTP_DISABLED_PREFIX ?? '/otp-disabled'}` });
     try {
       const err = await otp(auth)

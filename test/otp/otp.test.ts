@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createJwtAuth, memoryStore, userSession } from '../../src';
-import type { AuthEvent, JwtAuth, TokenStore } from '../../src';
+import type { AuthEvent, JwtAuth, TokenStore, Unwrap } from '../../src';
 import { SpAuthError } from '../../src';
 import { otp } from '../../src/otp';
 
@@ -37,7 +37,10 @@ interface Setup {
   events: AuthEvent[];
 }
 
-function setup(handler: Handler, o: { cookie?: boolean; endpoints?: Record<string, string>; device?: boolean } = {}): Setup {
+function setup(
+  handler: Handler,
+  o: { cookie?: boolean; endpoints?: Record<string, string>; device?: boolean; unwrap?: Unwrap } = {},
+): Setup {
   const calls: Call[] = [];
   const f = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
     const c: Call = {
@@ -57,6 +60,7 @@ function setup(handler: Handler, o: { cookie?: boolean; endpoints?: Record<strin
     endpoints: { ...(o.endpoints ?? {}) },
     mode: userSession({ crossTab: false, storage: store, ...(o.cookie ? { transport: 'cookie' as const } : {}) }),
     fetch: f,
+    ...(o.unwrap ? { unwrap: o.unwrap } : {}),
     onEvent: (e) => events.push(e),
     ...(o.device ? { device: { id: 'dev-1', name: 'Laptop' } } : {}),
   });
@@ -96,7 +100,7 @@ describe('otp request / resend / resendByDestination', () => {
     }
   });
 
-  it('uses endpoints.otp when set, and unwraps a { data } envelope', async () => {
+  it('uses endpoints.otp when set, and parses a { success, data } shape', async () => {
     const s = setup(() => json({ success: true, data: sent }, 202), { endpoints: { otp: '/auth/otp' } });
     expect(await otp(s.auth).request(req)).toEqual(sent);
     expect(s.calls[0]?.path).toBe('/auth/otp/request');
@@ -144,6 +148,32 @@ describe('otp request / resend / resendByDestination', () => {
       expect(e.code).toBe('module_disabled');
       expect(e.module).toBe('otp');
     }
+  });
+});
+
+describe('otp unwrap handling', () => {
+  it('a custom unwrap function works for request, resend and resendByDestination', async () => {
+    const s = setup(() => json({ payload: sent }, 202), {
+      unwrap: (b) => (b as { payload: unknown }).payload,
+    });
+    const o = otp(s.auth);
+    expect(await o.request(req)).toEqual(sent);
+    expect(await o.resend({ otp_id: 'o-1', destination: req.destination, channel: req.channel })).toEqual(sent);
+    expect(await o.resendByDestination(req)).toEqual(sent);
+  });
+
+  it("configured 'laravel' and 'sp-laravel-api' clients parse OtpSent", async () => {
+    const a = setup(() => json({ data: sent }, 202), { unwrap: 'laravel' });
+    expect(await otp(a.auth).request(req)).toEqual(sent);
+    const b = setup(() => json({ success: true, error_code: null, data: sent, meta: {} }, 202), { unwrap: 'sp-laravel-api' });
+    expect(await otp(b.auth).request(req)).toEqual(sent);
+  });
+
+  it('a 202 with no otp_id anywhere throws unknown without echoing the body', async () => {
+    const s = setup(() => json({ payload: { secret: 'body-secret-xyz' } }, 202), { unwrap: (b) => (b as { payload: unknown }).payload });
+    const e = await caught(otp(s.auth).request(req));
+    expect(e.code).toBe('unknown');
+    expect(e.message).not.toContain('body-secret-xyz');
   });
 });
 

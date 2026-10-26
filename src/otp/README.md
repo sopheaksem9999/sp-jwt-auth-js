@@ -20,7 +20,7 @@ await codes.verify({ otp_id: sent.otp_id, code: '123456' });
 | `verify(b)` | `POST /verify` | `void`; the token pair is stored through `auth.acceptTokens` |
 
 - `request`, `resend` and `resendByDestination` are unauthenticated and send no device headers. `verify` issues tokens: it sends the device headers (when the `device` option is set) and `credentials: 'include'` in cookie mode, and passes the response to `acceptTokens` so the cookie transport drops the body refresh token and reads `X-SP-CSRF`.
-- The `{ data }` envelope around the sent descriptor is looked through, whatever the `unwrap` option.
+- The sent descriptor is read from the body unwrapped per the client's `unwrap` option (including a function); when that has no `otp_id`, the raw body and one `{ data }` level of it are tried.
 - On any `verify` failure nothing is stored and the state is unchanged. The code never appears in errors or events.
 
 ## Errors (`SpAuthError`, `module: 'otp'`)

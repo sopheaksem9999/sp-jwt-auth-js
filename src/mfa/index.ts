@@ -5,7 +5,7 @@ export interface MfaModule {
   /**
    * POSTs the challenge to `endpoints.secondFactorResend` (host route; throws
    * `SpAuthError('not_configured')` with module `mfa` when unset) and returns the
-   * response body as is. Body: `{ '2fa_token': token }` or `{ challenge_id: token }`.
+   * response body unwrapped per the `unwrap` option. Body: `{ '2fa_token': token }` or `{ challenge_id: token }`.
    * Verifying the code stays core `auth.verifySecondFactor`.
    */
   resend(challenge: Challenge): Promise<unknown>;
@@ -30,7 +30,7 @@ export function mfa(auth: JwtAuth): MfaModule {
         bearer: false,
         module: MODULE,
       });
-      return raw;
+      return auth.unwrap(raw);
     },
   };
 }

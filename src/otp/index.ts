@@ -67,9 +67,13 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** The sent descriptor from a raw body, looking through one `{ data }` wrapper (the backend wraps per `response_envelope`). */
-function toSent(raw: unknown): OtpSent | null {
-  for (const v of [raw, isRecord(raw) ? raw.data : undefined]) {
+/**
+ * The sent descriptor from a raw body: the configured `unwrap` first, then (when
+ * that value has no `otp_id`) the raw body and one `{ data }` level of it.
+ */
+function toSent(auth: JwtAuth, raw: unknown): OtpSent | null {
+  const unwrapped = auth.unwrap(raw);
+  for (const v of [unwrapped, raw, isRecord(raw) ? raw.data : undefined]) {
     if (isRecord(v) && typeof v.otp_id === 'string' && typeof v.destination_masked === 'string' && typeof v.expires_in === 'number') {
       return { otp_id: v.otp_id, destination_masked: v.destination_masked, expires_in: v.expires_in };
     }
@@ -96,7 +100,7 @@ export function otp(auth: JwtAuth): OtpModule {
       module: MODULE,
       disabledOn404: true,
     });
-    const sent = toSent(raw);
+    const sent = toSent(auth, raw);
     if (!sent) {
       throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not describe a sent OTP', module: MODULE });
     }

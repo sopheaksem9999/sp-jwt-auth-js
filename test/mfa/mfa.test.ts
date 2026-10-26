@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createJwtAuth, memoryStore, userSession } from '../../src';
-import type { Challenge, JwtAuth } from '../../src';
+import type { Challenge, JwtAuth, Unwrap } from '../../src';
 import { SpAuthError } from '../../src';
 import { mfa } from '../../src/mfa';
 
@@ -14,6 +14,7 @@ interface Call {
 function setup(
   respond: () => Response,
   endpoints: Record<string, string> = { secondFactorResend: '/auth/login/2fa/resend' },
+  unwrap?: Unwrap,
 ): { auth: JwtAuth; calls: Call[] } {
   const calls: Call[] = [];
   const f = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
@@ -30,6 +31,7 @@ function setup(
     endpoints,
     mode: userSession({ crossTab: false, storage: memoryStore() }),
     fetch: f,
+    ...(unwrap ? { unwrap } : {}),
   });
   return { auth, calls };
 }
@@ -53,6 +55,17 @@ describe('mfa.resend', () => {
     const s = setup(() => ok());
     await mfa(s.auth).resend({ kind: 'challenge_id', token: 'ch-9' });
     expect(JSON.parse(s.calls[0]?.body ?? '')).toEqual({ challenge_id: 'ch-9' });
+  });
+
+  it('returns the body unwrapped per the configured unwrap (laravel, sp-laravel-api, function)', async () => {
+    const c: Challenge = { kind: 'challenge_id', token: 'ch-1' };
+    const ep = { secondFactorResend: '/r' };
+    const a = setup(() => ok({ data: { sent: 1 } }), ep, 'laravel');
+    expect(await mfa(a.auth).resend(c)).toEqual({ sent: 1 });
+    const b = setup(() => ok({ success: true, data: { sent: 2 }, meta: {} }), ep, 'sp-laravel-api');
+    expect(await mfa(b.auth).resend(c)).toEqual({ sent: 2 });
+    const f = setup(() => ok({ payload: { sent: 3 } }), ep, (x) => (x as { payload: unknown }).payload);
+    expect(await mfa(f.auth).resend(c)).toEqual({ sent: 3 });
   });
 
   it('unset endpoints.secondFactorResend -> not_configured (module mfa), no request', async () => {
