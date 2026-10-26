@@ -1,0 +1,67 @@
+{
+  "name": "@sopheak/sp-jwt-auth",
+  "version": "0.0.0",
+  "description": "Typed JavaScript client for the sopheak/sp-jwt-auth Laravel package: token storage, refresh and session helpers.",
+  "license": "MIT",
+  "author": "Sem Sopheak",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "check": "pnpm build && publint && attw --pack . && node scripts/check-dist.mjs && node scripts/check-modules.mjs",
+    "changeset": "changeset"
+  },
+  "peerDependencies": {
+    "jose": "^6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "jose": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@changesets/cli": "3.0.3",
+    "@edge-runtime/vm": "5.0.0",
+    "@types/node": "26.6.5",
+    "eslint": "10.12.0",
+    "jose": "6.2.12",
+    "publint": "0.3.25",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1",
+    "vitest": "5.0.3"
+  },
+  "packageManager": "pnpm@12.11.2"
+}
