@@ -193,7 +193,7 @@ console.log(await userAuth.getHeaders()); // { Authorization: 'Bearer user-token
 await userAuth.whoami(); // GET /me as that user
 ```
 
-Still coming in later releases: the `otp`, `mfa`, `sessions`, `oauth` (authorization code, introspection, revocation), `social` and `account` modules. They are described in the design spec but ship later.
+Still coming in later releases: the `sessions`, `oauth` (authorization code, introspection, revocation), `social` and `account` modules. They are described in the design spec but ship later.
 
 ### Next.js (and other server-rendering frameworks)
 
@@ -320,21 +320,47 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 
 ## Modules
 
-Each module is a function that takes the core auth object. **The core (session, cookie transport and the server modes) and `verify` ship in 0.1**; the rest are coming in later releases.
+Each module is a function that takes the core auth object. **The core (session, cookie transport and the server modes), `verify`, `otp` and `mfa` ship in 0.1**; the rest are coming in later releases.
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
 | Core: `JwtTokenService`, guard, `TokenContext`; `token_endpoints`; host login / 2FA | `@sopheak/sp-jwt-auth` | `createJwtAuth`, `userSession`, state/subscribe, `memoryStore` / `webStorageStore`, refresh rules, `getHeaders`, `handleUnauthorized`, scope checks, claims, single flight, cross-tab lock, `login`, `verifySecondFactor`, `logout`, `whoami`, `switchCompany`, `presets`, cookie transport (`transport: 'cookie'`, `restore()`, `readCookie`) | **0.1** |
 | `api_keys` | `@sopheak/sp-jwt-auth` (core) | `apiKey()` mode | **0.1** |
 | (server tokens) | `@sopheak/sp-jwt-auth` (core) | `staticToken()` mode | **0.1** |
-| `first_factor_otp` | `@sopheak/sp-jwt-auth/otp` | `otp(auth)` | coming later |
-| `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | coming later |
+| `first_factor_otp` | `@sopheak/sp-jwt-auth/otp` | `otp(auth)` | **0.1** |
+| `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | **0.1** |
 | Sessions | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)` | coming later |
 | `oauth_server` | `@sopheak/sp-jwt-auth` (core) | `clientCredentials()` mode | **0.1** |
 | `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode, `introspect`, `revoke` | coming later |
 | `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)` | coming later |
 | `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)` | coming later |
 | `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
+
+### First-factor OTP (`otp`)
+
+```ts
+import { otp } from '@sopheak/sp-jwt-auth/otp';
+
+const codes = otp(auth);
+const sent = await codes.request({ destination: 'a@example.com', channel: 'email', purpose: 'login' }); // 202
+await codes.verify({ otp_id: sent.otp_id, code: '123456' }); // stores the pair, state becomes 'authenticated'
+```
+
+Needs the backend's `first_factor_otp` module (off by default; a 404 is `module_disabled`). Routes are under `endpoints.otp` (default `/otp`). Errors: `invalid_code` (422), `rate_limited` with `retryAfter` (429), `delivery_failed` (502). Details: [`src/otp/README.md`](src/otp/README.md).
+
+### MFA resend (`mfa`)
+
+```ts
+import { mfa } from '@sopheak/sp-jwt-auth/mfa';
+
+const result = await auth.login(credentials);
+if (result.status === 'second_factor_required') {
+  await mfa(auth).resend(result.challenge); // POSTs endpoints.secondFactorResend
+  await auth.verifySecondFactor(result.challenge, '123456'); // verifying stays in the core
+}
+```
+
+`endpoints.secondFactorResend` is a host route; when unset the call throws `not_configured` (module `mfa`). Details: [`src/mfa/README.md`](src/mfa/README.md).
 
 ## Backend compatibility
 

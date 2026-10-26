@@ -16,6 +16,12 @@
     "*": {
       "verify": [
         "./dist/verify.d.ts"
+      ],
+      "otp": [
+        "./dist/otp.d.ts"
+      ],
+      "mfa": [
+        "./dist/mfa.d.ts"
       ]
     }
   },
@@ -38,6 +44,26 @@
       "require": {
         "types": "./dist/verify.d.cts",
         "default": "./dist/verify.cjs"
+      }
+    },
+    "./otp": {
+      "import": {
+        "types": "./dist/otp.d.ts",
+        "default": "./dist/otp.js"
+      },
+      "require": {
+        "types": "./dist/otp.d.cts",
+        "default": "./dist/otp.cjs"
+      }
+    },
+    "./mfa": {
+      "import": {
+        "types": "./dist/mfa.d.ts",
+        "default": "./dist/mfa.js"
+      },
+      "require": {
+        "types": "./dist/mfa.d.cts",
+        "default": "./dist/mfa.cjs"
       }
     }
   },

@@ -390,6 +390,7 @@ export function createJwtAuth(o: JwtAuthOptions): JwtAuth {
       return t === undefined ? state.get().claims : decodeClaims(t);
     },
 
+    credentials: runtime.credentials,
     http,
     endpoint,
     acceptTokens,

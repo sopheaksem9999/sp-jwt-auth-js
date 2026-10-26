@@ -25,6 +25,8 @@ export interface HttpRequest {
   signal?: AbortSignal;
   /** Module name stamped on any `SpAuthError` thrown. */
   module?: string;
+  /** A 404 means the module's route is switched off: it throws `SpAuthError('module_disabled')`. */
+  disabledOn404?: boolean;
 }
 
 /** Token from an `Authorization: Bearer …` header (header name and scheme case-insensitive), or `null`. */
@@ -132,7 +134,7 @@ export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<Htt
       if (req.credentials !== undefined) init.credentials = req.credentials;
       try {
         response = await doFetch(url, init);
-        if (!response.ok) throw await authErrorFromResponse(response, { module });
+        if (!response.ok) throw await authErrorFromResponse(response, { module, disabledOn404: req.disabledOn404 });
         text = await response.text();
       } catch (e) {
         if (e instanceof SpAuthError) throw e;

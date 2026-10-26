@@ -275,6 +275,12 @@ export interface JwtAuth {
   subscribe(l: () => void): () => void;
   /** Decodes `t`, or the current access token's claims when omitted. */
   decodeClaims(t?: string): Claims | null;
+  /**
+   * Module surface: `'include'` when the mode's transport needs credentialed
+   * requests (cookie transport), else `undefined`. Token-issuing modules pass it
+   * as `HttpRequest.credentials`, like `login()` does.
+   */
+  readonly credentials?: 'include';
   /** Module surface: request helper. */
   http<T>(o: HttpRequest): Promise<HttpResult<T>>;
   /** Module surface: endpoint path; throws `SpAuthError('not_configured', module)` when unset. */
