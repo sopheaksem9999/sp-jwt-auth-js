@@ -10,7 +10,7 @@ export default defineConfig({
           name: 'edge',
           environment: 'edge-runtime',
           include: ['test/**/*.test.ts'],
-          exclude: ['test/**/*.contract.test.ts', 'test/node/**', 'test/support/**'],
+          exclude: ['test/**/*.contract.test.ts', 'test/node/**', 'test/support/**', 'test/verify/verify.test.ts'],
         },
       },
     ],

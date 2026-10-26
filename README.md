@@ -1,6 +1,6 @@
 # @sopheak/sp-jwt-auth
 
-Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (coming in a later release).
+Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (`@sopheak/sp-jwt-auth/verify`).
 
 > Status: **0.1, core only.** The core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport) and the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`) are what this release ships. Everything marked "coming later" below is **not available yet**; do not build on it.
 
@@ -193,7 +193,7 @@ console.log(await userAuth.getHeaders()); // { Authorization: 'Bearer user-token
 await userAuth.whoami(); // GET /me as that user
 ```
 
-Still coming in later releases: the `otp`, `mfa`, `sessions`, `oauth` (authorization code, introspection, revocation), `social`, `account` and `verify` modules. They are described in the design spec but ship later.
+Still coming in later releases: the `otp`, `mfa`, `sessions`, `oauth` (authorization code, introspection, revocation), `social` and `account` modules. They are described in the design spec but ship later.
 
 ### Next.js (and other server-rendering frameworks)
 
@@ -270,6 +270,31 @@ createJwtAuth({ baseUrl, ...presets.spJwtTest, endpoints: { ...presets.spJwtTest
 
 Routes you do not configure make the feature that needs them reject with `SpAuthError('not_configured')`.
 
+## Verifying tokens in Node (`verify`)
+
+Accept the same access tokens Laravel issued in an Express middleware, a NestJS guard or any Node API. Needs the optional peer `jose` (`npm i jose`); it is imported only from this subpath.
+
+```ts
+import { createVerifier } from '@sopheak/sp-jwt-auth/verify';
+
+const verify = createVerifier({ jwksUrl: process.env.SP_JWKS_URL!, issuer: process.env.SP_ISSUER! });
+
+// Express (illustrative)
+const requireUser: RequestHandler = async (req, res, next) => {
+  try {
+    req.user = await verify(req.headers.authorization?.slice(7) ?? '');
+    next();
+  } catch {
+    res.status(401).end();
+  }
+};
+
+// NestJS (illustrative): the same call inside a CanActivate guard
+//   canActivate(ctx) { const req = ctx.switchToHttp().getRequest(); return verify(bearer(req)).then((c) => ((req.user = c), true)); }
+```
+
+`verify(token)` returns the normalised `Claims` or throws `SpAuthError`: `invalid_token` for anything wrong with the token, `network` when the JWKS cannot be loaded. Unknown `kid`s trigger a cooldown-limited refetch (key rotation needs no restart) and a failed refetch keeps the last good keys. **It checks signature and claims only and cannot see logouts or revocations** (see below): keep access TTLs short and call `whoami` for revocation-sensitive actions. Details: [`src/verify/README.md`](src/verify/README.md).
+
 ## Revocation limit
 
 The Laravel backend checks the token's `jti` row in the database on **every request**, so a logout or revocation takes effect at once for calls that reach Laravel. Anything that only verifies the JWT signature (a JWKS-only check in another service) cannot see revocations: such a token stays acceptable until it expires (15 minutes by default). Treat client-side claims (`getState().claims`, `hasScope()`) as UI hints; the server decides. `logout()` clears local state first and revokes server-side best effort, so an offline or failing revoke never leaves the UI signed in.
@@ -295,7 +320,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 
 ## Modules
 
-Each module is a function that takes the core auth object. **Only the core (session, cookie transport and the server modes) ships in 0.1**; the rest are coming in later releases.
+Each module is a function that takes the core auth object. **The core (session, cookie transport and the server modes) and `verify` ship in 0.1**; the rest are coming in later releases.
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
@@ -309,7 +334,7 @@ Each module is a function that takes the core auth object. **Only the core (sess
 | `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode, `introspect`, `revoke` | coming later |
 | `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)` | coming later |
 | `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)` | coming later |
-| `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | coming later |
+| `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
 
 ## Backend compatibility
 
