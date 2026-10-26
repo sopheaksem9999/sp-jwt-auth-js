@@ -293,7 +293,7 @@ const requireUser: RequestHandler = async (req, res, next) => {
 //   canActivate(ctx) { const req = ctx.switchToHttp().getRequest(); return verify(bearer(req)).then((c) => ((req.user = c), true)); }
 ```
 
-`verify(token)` returns the normalised `Claims` or throws `SpAuthError`: `invalid_token` for anything wrong with the token, `network` when the JWKS cannot be loaded. Unknown `kid`s trigger a cooldown-limited refetch (key rotation needs no restart) and a failed refetch keeps the last good keys. **It checks signature and claims only and cannot see logouts or revocations** (see below): keep access TTLs short and call `whoami` for revocation-sensitive actions. Details: [`src/verify/README.md`](src/verify/README.md).
+`verify(token)` returns the normalised `Claims` or throws `SpAuthError`: `invalid_token` for anything wrong with the token, `network` when the JWKS cannot be loaded. The key set is refreshed every `cacheMaxAgeMs` (10 minutes); during a JWKS outage the last good keys are kept for up to `maxStaleMs` (24 hours), and a successful refetch drops retired keys. Unknown `kid`s trigger a cooldown-limited refetch, so key rotation needs no restart. **It checks signature and claims only and cannot see logouts or revocations** (see below): keep access TTLs short and call `whoami` for revocation-sensitive actions. Details: [`src/verify/README.md`](src/verify/README.md).
 
 ## Revocation limit
 

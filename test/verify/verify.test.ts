@@ -1,5 +1,5 @@
 // Needs a local HTTP server (test/node), so it runs in the vitest `node` project only.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SignJWT, generateKeyPair } from 'jose';
 import { createVerifier } from '../../src/verify';
 import { SpAuthError } from '../../src';
@@ -7,7 +7,12 @@ import { publicJwk, startJwksServer } from '../node/jwks-server';
 import type { JwksServer } from '../node/jwks-server';
 
 const ISSUER = 'https://auth.example.test';
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Fakes only `Date` (real sockets and promises keep working) so cache ages and cooldowns are controlled without sleeping. */
+function useClock(): { advance(ms: number): void } {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  return { advance: (ms) => vi.setSystemTime(Date.now() + ms) };
+}
 const now = () => Math.floor(Date.now() / 1000);
 
 interface Pair {
@@ -52,6 +57,7 @@ beforeEach(async () => {
   server = await startJwksServer([await publicJwk(k1.publicKey, 'k1')]);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await server.close();
 });
 
@@ -149,46 +155,123 @@ describe('createVerifier', () => {
   });
 
   it('verifies a token with an unknown kid after the key set is rotated', async () => {
-    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 10 });
+    const clock = useClock();
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 1000 });
     expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
     server.setKeys([await publicJwk(k1.publicKey, 'k1'), await publicJwk(k2.publicKey, 'k2')]);
-    await sleep(30);
+    clock.advance(2000);
     expect((await verify(await sign(k2.privateKey, 'k2'))).sub).toBe('42');
     expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
   });
 
   it('respects the cooldown: an unknown kid inside it does not refetch', async () => {
+    const clock = useClock();
     const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 60_000 });
     await verify(await sign(k1.privateKey, 'k1'));
     expect(server.requests).toBe(1);
     server.setKeys([await publicJwk(k2.publicKey, 'k2')]);
+    clock.advance(30_000);
     const err = await rejection(verify(await sign(k2.privateKey, 'k2')));
     expect(err.code).toBe('invalid_token');
     expect(server.requests).toBe(1);
+    clock.advance(31_000);
+    expect((await verify(await sign(k2.privateKey, 'k2'))).sub).toBe('42');
+    expect(server.requests).toBe(2);
   });
 
   it('rejects an unknown kid as invalid_token once the cooldown has passed and the key is still absent', async () => {
-    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 10 });
+    const clock = useClock();
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 1000 });
     await verify(await sign(k1.privateKey, 'k1'));
-    await sleep(30);
+    clock.advance(2000);
     const err = await rejection(verify(await sign(k2.privateKey, 'ghost')));
     expect(err.code).toBe('invalid_token');
     expect(server.requests).toBe(2);
   });
 
-  it('keeps the last good key set when a refetch fails', async () => {
-    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 10 });
+  it('keeps the last good key set when an unknown-kid refetch fails (token is invalid_token, not network)', async () => {
+    const clock = useClock();
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cooldownMs: 1000 });
     expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
     server.failWith(500);
-    await sleep(30);
+    clock.advance(2000);
     const err = await rejection(verify(await sign(k2.privateKey, 'k2')));
-    expect(err.code).toBe('network');
+    expect(err.code).toBe('invalid_token');
     expect(server.requests).toBe(2);
-    // The old key still verifies without another fetch, and the failure did not poison the cache.
     expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
     expect(server.requests).toBe(2);
     server.setKeys([await publicJwk(k1.publicKey, 'k1'), await publicJwk(k2.publicKey, 'k2')]);
+    clock.advance(2000);
     expect((await verify(await sign(k2.privateKey, 'k2'))).sub).toBe('42');
+  });
+
+  it('still verifies a known kid after the cache went stale while the JWKS endpoint fails', async () => {
+    const clock = useClock();
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER });
+    expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
+    server.failWith(500);
+    clock.advance(11 * 60_000); // past the 10 minute cacheMaxAgeMs
+    expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42');
+    expect(server.requests).toBe(2); // the refresh was attempted and failed
+  });
+
+  it('refreshes after cacheMaxAgeMs and fails with network once maxStaleMs has passed', async () => {
+    const clock = useClock();
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, cacheMaxAgeMs: 1000, maxStaleMs: 60_000, cooldownMs: 100 });
+    await verify(await sign(k1.privateKey, 'k1'));
+    clock.advance(2000);
+    await verify(await sign(k1.privateKey, 'k1'));
+    expect(server.requests).toBe(2); // fresh refetch after the cache aged out
+    server.failWith(500);
+    clock.advance(30_000);
+    expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42'); // stale but within maxStaleMs
+    clock.advance(40_000);
+    const err = await rejection(verify(await sign(k1.privateKey, 'k1')));
+    expect(err.code).toBe('network');
+  });
+
+  it('drops a retired key when a refetch succeeds', async () => {
+    const clock = useClock();
+    server.setKeys([await publicJwk(k1.publicKey, 'k1'), await publicJwk(k2.publicKey, 'k2')]);
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER });
+    expect((await verify(await sign(k2.privateKey, 'k2'))).sub).toBe('42');
+    server.setKeys([await publicJwk(k1.publicKey, 'k1')]);
+    clock.advance(11 * 60_000);
+    expect((await verify(await sign(k1.privateKey, 'k1'))).sub).toBe('42'); // stale refresh replaces the set
+    const err = await rejection(verify(await sign(k2.privateKey, 'k2')));
+    expect(err.code).toBe('invalid_token');
+  });
+
+  it('shares one in-flight fetch between concurrent verifies', async () => {
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER });
+    const token = await sign(k1.privateKey, 'k1');
+    const results = await Promise.all(Array.from({ length: 8 }, () => verify(token)));
+    expect(results.every((c) => c.sub === '42')).toBe(true);
+    expect(server.requests).toBe(1);
+  });
+
+  it('shares one failed fetch between concurrent verifies and retries on the next call', async () => {
+    server.failWith(500);
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER });
+    const token = await sign(k1.privateKey, 'k1');
+    const errs = await Promise.all(Array.from({ length: 5 }, () => rejection(verify(token))));
+    expect(errs.every((e) => e.code === 'network')).toBe(true);
+    expect(server.requests).toBe(1);
+    server.recover();
+    expect((await verify(token)).sub).toBe('42');
+  });
+
+  it('accepts a token whose nbf is a few seconds ahead when clockToleranceSeconds allows it', async () => {
+    const token = await sign(k1.privateKey, 'k1', {}, { nbf: now() + 5 });
+    expect((await rejection(createVerifier({ jwksUrl: server.url, issuer: ISSUER })(token))).code).toBe('invalid_token');
+    const tolerant = createVerifier({ jwksUrl: server.url, issuer: ISSUER, clockToleranceSeconds: 10 });
+    expect((await tolerant(token)).sub).toBe('42');
+  });
+
+  it('accepts an audience array and matches any of its values', async () => {
+    const verify = createVerifier({ jwksUrl: server.url, issuer: ISSUER, audience: ['api', 'web'] });
+    expect((await verify(await sign(k1.privateKey, 'k1', {}, { aud: 'web' }))).sub).toBe('42');
+    expect((await rejection(verify(await sign(k1.privateKey, 'k1', {}, { aud: 'other' })))).code).toBe('invalid_token');
   });
 
   it('reports a JWKS retrieval failure with no cached keys as network, not invalid_token', async () => {
@@ -241,5 +324,6 @@ describe('createVerifier', () => {
   it('throws a TypeError for an invalid configuration', () => {
     expect(() => createVerifier({ jwksUrl: 'not a url', issuer: ISSUER })).toThrow(TypeError);
     expect(() => createVerifier({ jwksUrl: server.url, issuer: '' })).toThrow(TypeError);
+    expect(() => createVerifier({ jwksUrl: server.url, issuer: ISSUER, maxStaleMs: -1 })).toThrow(TypeError);
   });
 });

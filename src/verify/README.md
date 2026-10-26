@@ -13,7 +13,7 @@ const verify = createVerifier({ jwksUrl, issuer, audience /* optional */, algori
 const claims = await verify(token); // { sub: string, scopes: string[], exp, sid?, company_id?, ... }
 ```
 
-Options: `jwksUrl`, `issuer` (required `iss`), `audience` (checked only when set), `algorithms` (default `['RS256']`), `cooldownMs` (jose `cooldownDuration`, default 30 000), `fetch` (for the JWKS request).
+Options: `jwksUrl`, `issuer` (required `iss`), `audience` (string or array, checked only when set), `algorithms` (default `['RS256']`), `cooldownMs` (default 30 000), `cacheMaxAgeMs` (default 10 minutes), `maxStaleMs` (default 24 hours), `timeoutMs` (default 5000), `clockToleranceSeconds` (default 0; tolerated skew for `exp`/`nbf`), `fetch` (for the JWKS request; redirects are followed).
 
 ## Errors
 
@@ -26,9 +26,15 @@ Every failure is an `SpAuthError`, and the token text is never put in a message.
 
 `createVerifier` throws a `TypeError` at creation for a bad configuration: an invalid `jwksUrl`, an empty `issuer`, or any algorithm other than RS256/RS384/RS512/PS256/PS384/PS512 (HMAC and `none` are refused up front; the JWKS only publishes RSA keys).
 
-## Key rotation
+## Key cache and rotation
 
-The key set is cached and looked up by `kid`. A token with an unknown `kid` triggers one refetch, at most once per `cooldownMs`, so rotations need no restart. When a refetch fails the last good key set is kept; tokens signed by a cached key keep verifying, and only the token that needed the refetch gets `network`.
+The verifier keeps its own key cache over jose's `createLocalJWKSet`:
+
+- The fetched key set is fresh for `cacheMaxAgeMs`; the next verify after that refreshes it.
+- If the refresh fails (JWKS outage), the last good key set keeps being used for up to `maxStaleMs` after it was fetched. After that, failures surface as `network`. With no key set ever fetched, a failure is `network` immediately.
+- A token with an unknown `kid` triggers one refetch, at most once per `cooldownMs`, so rotations need no restart. If that refetch fails the last good set is kept and the token fails as `invalid_token`.
+- A successful fetch **replaces** the whole set, so retired (or compromised, see backend J14) keys stop verifying at the next refresh. Stale keys are only trusted during an outage, for at most `maxStaleMs`.
+- Concurrent callers share one in-flight fetch.
 
 ## Revocation limit
 
