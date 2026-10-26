@@ -96,6 +96,12 @@ describe('clientCredentials', () => {
     expect(calls[0]!.headers.authorization).toBe(basic('idé', 'sécrèt'));
   });
 
+  it('Basic uses raw id:secret (no form-encoding) for %, +, : and space', async () => {
+    const { auth, calls } = setup(cc({ clientId: 'a%2Fb+c d', clientSecret: 's:e%c+r et' }));
+    await auth.getAccessToken();
+    expect(calls[0]!.headers.authorization).toBe(basic('a%2Fb+c d', 's:e%c+r et'));
+  });
+
   it("auth: 'body' sends client_id/client_secret in the body and no Authorization", async () => {
     const { auth, calls } = setup(cc({ auth: 'body' }));
     await auth.getAccessToken();
@@ -165,6 +171,42 @@ describe('clientCredentials', () => {
     expect(calls).toHaveLength(1);
     vi.setSystemTime(Date.now() + 560_000);
     expect(await auth.getAccessToken()).toBe(tokenN(2));
+  });
+
+  it('a short-lived token (expires_in 30, ahead 60) is not re-fetched on every call', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    const { auth, calls } = setup(cc(), (_c, n) => json({ access_token: tokenN(n), expires_in: 30 }), {
+      refreshAheadSeconds: 60,
+    });
+    expect(await auth.getAccessToken()).toBe(tokenN(1));
+    expect(await auth.getAccessToken()).toBe(tokenN(1));
+    expect(calls).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 16_000); // past refreshAt (15s)
+    expect(await auth.getAccessToken()).toBe(tokenN(2));
+    expect(calls).toHaveLength(2);
+  });
+
+  it('logout racing an in-flight fetch does not resurrect the token', async () => {
+    let release: (r: Response) => void = () => undefined;
+    const { auth } = setup(cc(), () => new Promise<Response>((r) => (release = r)));
+    const pending = auth.getAccessToken();
+    await new Promise((r) => setTimeout(r, 0));
+    await auth.logout();
+    release(ok({} as Call, 1));
+    expect(await pending).toBeNull();
+    expect(auth.getState().status).toBe('anonymous');
+  });
+
+  it('handleUnauthorized with a pre-aborted signal rejects with its reason and makes no request', async () => {
+    const { auth, calls } = setup(cc());
+    const t = await auth.getAccessToken();
+    const ac = new AbortController();
+    ac.abort(new Error('stop'));
+    await expect(
+      auth.handleUnauthorized({ headers: { Authorization: `Bearer ${t}` }, signal: ac.signal }),
+    ).rejects.toThrow('stop');
+    expect(calls).toHaveLength(1);
   });
 
   it('50 concurrent getAccessToken calls share one token request', async () => {
@@ -386,6 +428,33 @@ describe('staticToken', () => {
 });
 
 describe('server rule', () => {
+  it.each([['no argument', undefined], ['empty options', {}]])(
+    'userSession with %s uses its own memory store: no throw, anonymous, no browser globals, no sharing',
+    async (_n, opts) => {
+      const g = globalThis as Record<string, unknown>;
+      const spy = vi.fn();
+      Object.defineProperty(g, 'localStorage', { configurable: true, get: spy });
+      try {
+        const a = createJwtAuth({ baseUrl: 'http://api.test', endpoints: {}, mode: userSession(opts) });
+        const b = createJwtAuth({ baseUrl: 'http://api.test', endpoints: {}, mode: userSession(opts) });
+        await a.ready();
+        expect(a.getState().status).toBe('anonymous');
+        expect(await a.getHeaders()).toEqual({});
+        const t = jwt({ sub: '1', exp: Math.floor(Date.now() / 1000) + 900 });
+        await a.acceptTokens({ access_token: t, refresh_token: 'r', expires_in: 900, token_type: 'Bearer' });
+        expect(await a.getHeaders()).toEqual({ Authorization: `Bearer ${t}` });
+        await b.ready();
+        expect(await b.getHeaders()).toEqual({});
+        expect(b.getState().status).toBe('anonymous');
+        expect(spy).not.toHaveBeenCalled();
+        a.dispose?.();
+        b.dispose?.();
+      } finally {
+        delete g.localStorage;
+      }
+    },
+  );
+
   it('userSession with a memory store and no document does not throw and is anonymous', async () => {
     expect((globalThis as { document?: unknown }).document).toBeUndefined();
     const auth = createJwtAuth({ baseUrl: 'http://api.test', endpoints: {}, mode: userSession({ storage: memoryStore() }) });

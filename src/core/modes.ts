@@ -47,7 +47,9 @@ export interface ClientCredentialsOptions {
  *   OAuth tokens are opaque so they are `null`).
  * - Expiry is `now + expires_in` when that is positive, else `defaultTtlSeconds`
  *   (0.1.24 and earlier returned `expires_in: 0`).
- * - It re-fetches when fewer than `refreshAheadSeconds` remain, and on a 401
+ * - It re-fetches when fewer than `refreshAheadSeconds` remain (the lead time is
+ *   clamped to half the token's lifetime, so a 30 s token with the default 60 is
+ *   renewed after 15 s, not on every call), and on a 401
  *   via `handleUnauthorized` (resolves `true` after a successful fetch, or at
  *   once when the failed request used a token other than the current one).
  *   Concurrent callers share one request (single flight, per instance); a
@@ -55,9 +57,12 @@ export interface ClientCredentialsOptions {
  * - A 400/401 from the token endpoint rejects with `SpAuthError` whose `code`
  *   is the RFC 6749 `error` (`invalid_client`, `invalid_scope`, …), drops the
  *   token and makes the state `anonymous`. Network errors, timeouts and 5xx
- *   reject with the state unchanged. `handleUnauthorized` rethrows these.
+ *   reject with the state unchanged. `handleUnauthorized` rethrows these token-fetch
+ *   failures (including `invalid_client`) rather than resolving `false`.
  * - Events: `token_fetched` (`expiresAt`) and `token_failed` (`status`, `code`).
- * - `logout()` clears the in-memory token; it makes no request.
+ * - `logout()` is local only: it clears the in-memory token and makes no request.
+ *   The token stays valid server-side until it expires (OAuth revocation needs a
+ *   client-authenticated `/oauth/revoke`).
  *
  * Create one per process.
  */
@@ -70,6 +75,8 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
     create(ctx: ModeContext): ModeRuntime {
       let token: string | null = null;
       let expiresAt = 0;
+      // When to renew: expiresAt minus the lead time, clamped to half the ttl so a short-lived token is not re-fetched on every call.
+      let refreshAt = 0;
       // Bumped on logout so a fetch already in flight cannot resurrect the token.
       let generation = 0;
 
@@ -78,6 +85,9 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
         const form: Record<string, string> = { grant_type: 'client_credentials' };
         if (scope !== '') form.scope = scope;
         const headers: Record<string, string> = {};
+        // Raw `id:secret` bytes, not form-encoded first: the server reads Symfony's
+        // `Request::getUser()/getPassword()` with no urldecode (sp-jwt-auth
+        // `src/Services/OAuthServerService.php:326-329`), so RFC 6749 §2.3.1 encoding would break `%`/`+` values.
         if (method === 'basic') headers.Authorization = `Basic ${utf8Base64(`${clientId}:${clientSecret}`)}`;
         else {
           form.client_id = clientId;
@@ -98,6 +108,7 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
           if ((status === 400 || status === 401) && started === generation) {
             token = null;
             expiresAt = 0;
+            refreshAt = 0;
             ctx.setAnonymous();
           }
           throw e;
@@ -120,12 +131,13 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
         const ttl = expiresIn > 0 ? expiresIn : (options.defaultTtlSeconds ?? 3600);
         token = access;
         expiresAt = ctx.now() + ttl;
+        refreshAt = expiresAt - Math.min(ctx.options.refreshAheadSeconds ?? 60, ttl / 2);
         ctx.setAuthenticated(access);
         ctx.emit({ type: 'token_fetched', expiresAt });
       };
       const fetcher = createRefresher({ perform });
 
-      const due = (): boolean => token === null || expiresAt - ctx.now() < (ctx.options.refreshAheadSeconds ?? 60);
+      const due = (): boolean => token === null || ctx.now() >= refreshAt;
 
       const getAccessToken = async (o?: { signal?: AbortSignal }): Promise<string | null> => {
         if (!due()) return token;
@@ -144,6 +156,7 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
         generation++;
         token = null;
         expiresAt = 0;
+        refreshAt = 0;
         ctx.setAnonymous();
       };
 
@@ -177,7 +190,8 @@ export function clientCredentials(options: ClientCredentialsOptions): AuthMode {
  * Static API-key mode: every request carries `Authorization: Bearer <key>`.
  * A 401 is final (`handleUnauthorized` resolves `false`). The key is never
  * stored or emitted, no request is made, the state is `authenticated` at once
- * with `claims: null`, and `logout()` only stops the instance sending it.
+ * with `claims: null`, and `logout()` is local only: it stops the instance sending
+ * the key and changes nothing server-side.
  * One instance per process is correct. Throws `SpAuthError('not_configured')` for an empty key.
  */
 export function apiKey(key: string): AuthMode {
@@ -218,7 +232,8 @@ export function apiKey(key: string): AuthMode {
  * anonymous (`{}` headers). A 401 is final (`handleUnauthorized` resolves
  * `false`): refreshing is the caller's job. The token is never stored or
  * emitted. `getState()` reflects the last token seen (claims decoded when it is
- * a JWT, best effort) and is `anonymous` until then.
+ * a JWT, best effort) and is `anonymous` until the first read. `logout()` is local
+ * only and calls `getToken` once (to capture the token for the facade).
  *
  * IMPORTANT: server code holding a user's token must create the auth instance
  * PER REQUEST. A shared instance would run the next request as the previous user.

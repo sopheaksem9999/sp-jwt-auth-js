@@ -2,13 +2,18 @@ import { createCrossTab, storeScopedCrossTab } from './crosstab';
 import type { CrossTab } from './crosstab';
 import { SpAuthError } from './errors';
 import { createRefresher, isSessionEnded, performTokenRefresh, waitFor } from './refresh';
+import { memoryStore } from './stores';
 import type { TokenStore, Tokens } from './stores';
 import type { AuthMode, ModeContext, ModeRuntime } from './types';
 
 /** Options for `userSession`. */
 export interface UserSessionOptions {
-  /** Where tokens are persisted. */
-  storage: TokenStore;
+  /**
+   * Where tokens are persisted. Default: a fresh `memoryStore()` per `userSession()`
+   * call (so on a server there are simply no tokens unless a store is passed, and
+   * nothing touches `window` or `localStorage`).
+   */
+  storage?: TokenStore;
   /** `'body'` (default): refresh token in storage. `'cookie'`: httpOnly cookie (not implemented yet). */
   transport?: 'body' | 'cookie';
   /**
@@ -26,9 +31,8 @@ export interface UserSessionOptions {
   crossTab?: boolean | { key?: string; instance?: CrossTab };
 }
 
-function resolveCrossTab(options: UserSessionOptions): { crossTab: CrossTab | null; owned: boolean } {
+function resolveCrossTab(options: UserSessionOptions, store: TokenStore): { crossTab: CrossTab | null; owned: boolean } {
   const o = options.crossTab;
-  const store = options.storage;
   if (o === false) return { crossTab: null, owned: false };
   if (typeof o === 'object' && o.instance) return { crossTab: o.instance, owned: false };
   const explicitKey = typeof o === 'object' ? o.key : undefined;
@@ -83,7 +87,7 @@ export function bearerFrom(headers: Record<string, string> | undefined): string 
  * opened on first use (hydration), never at creation; `JwtAuth.dispose()`
  * unsubscribes and closes it.
  */
-export function userSession(options: UserSessionOptions): AuthMode {
+export function userSession(options: UserSessionOptions = {}): AuthMode {
   if (options.transport === 'cookie') {
     throw new SpAuthError({
       status: 0,
@@ -92,11 +96,11 @@ export function userSession(options: UserSessionOptions): AuthMode {
       module: 'userSession',
     });
   }
-  const store = options.storage;
+  const store = options.storage ?? memoryStore();
   return {
     kind: 'userSession',
     create(baseCtx: ModeContext): ModeRuntime {
-      const { crossTab, owned } = resolveCrossTab(options);
+      const { crossTab, owned } = resolveCrossTab(options, store);
       // Bumped on every local state change, so a sync triggered by another tab never applies a stale read.
       let generation = 0;
       const ctx: ModeContext = {
