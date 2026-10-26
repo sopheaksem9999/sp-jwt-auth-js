@@ -9,3 +9,5 @@ export { detectChallenge, findTokenPair, unwrap } from './core/unwrap';
 export type { TokenPairRaw, Unwrap } from './core/unwrap';
 export { decodeClaims } from './core/claims';
 export type { Claims } from './core/claims';
+export { ensureDeviceId, memoryStore, webStorageStore } from './core/stores';
+export type { TokenStore, Tokens } from './core/stores';
