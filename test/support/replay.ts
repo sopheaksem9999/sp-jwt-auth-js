@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { scrub } from './scrub';
+import { SCRUBBED, REQUEST_HEADER_ALLOWLIST, isSecretKey, scrub, scrubParams, scrubQuery, scrubValue, sortKeys } from './scrub';
 
 /** One recorded exchange. Stored as one JSON file per request, named `<entryKey>.json`. */
 export interface RecordedEntry {
@@ -12,12 +12,12 @@ export interface RecordedEntry {
     method: string;
     /** URL path without host. */
     path: string;
-    /** Query string with pairs sorted, e.g. `a=1&b=2` (no leading `?`). */
+    /** Scrubbed query string with pairs sorted, e.g. `a=1&b=2` (no leading `?`). */
     query: string;
-    /** sha256 (hex) of the raw request body; absent when there is none. Computed before scrubbing. */
+    /** sha256 (hex) of the canonical, already scrubbed request body; absent when there is none. */
     bodyHash?: string;
+    /** Allowlist only: accept, content-type. */
     headers?: Record<string, string>;
-    body?: unknown;
   };
   response: {
     status: number;
@@ -31,47 +31,81 @@ export function hashBody(body: string): string {
   return createHash('sha256').update(body).digest('hex');
 }
 
-function sortedQuery(search: string): string {
-  const pairs = [...new URLSearchParams(search)].sort(([a, av], [b, bv]) => (a === b ? av.localeCompare(bv) : a.localeCompare(b)));
-  return new URLSearchParams(pairs).toString();
-}
-
-/** Stable key: sha256 of method, path, sorted query and body hash (first 24 hex chars). */
+/** Stable key: sha256 of method, path, scrubbed sorted query and canonical body hash (first 24 hex chars). */
 export function entryKey(r: Pick<RecordedEntry['request'], 'method' | 'path' | 'query' | 'bodyHash'>): string {
   return createHash('sha256')
-    .update([r.method.toUpperCase(), r.path, sortedQuery(r.query), r.bodyHash ?? ''].join('\n'))
+    .update([r.method.toUpperCase(), r.path, scrubQuery(r.query), r.bodyHash ?? ''].join('\n'))
     .digest('hex')
     .slice(0, 24);
+}
+
+function canonicalText(s: string, contentType: string): string | undefined {
+  if (s === '') return undefined;
+  if (contentType.toLowerCase().includes('application/x-www-form-urlencoded')) return `form:${scrubParams(s, true)}`;
+  try {
+    const parsed: unknown = JSON.parse(s);
+    return `json:${JSON.stringify(sortKeys(scrubValue(parsed)))}`;
+  } catch {
+    return `text:${s}`;
+  }
+}
+
+function canonicalFormData(fd: FormData): string {
+  const entries: unknown[] = [];
+  fd.forEach((v, k) => {
+    if (typeof v === 'string') entries.push([k, isSecretKey(k) ? SCRUBBED : v]);
+    else entries.push([k, { file: v.name, size: v.size }]);
+  });
+  return `formdata:${JSON.stringify(entries)}`;
+}
+
+/**
+ * Canonical form of a request body, computed AFTER scrubbing secret fields and never containing a
+ * multipart boundary. Throws for stream bodies (they cannot be hashed without being consumed).
+ */
+export async function canonicalBody(b: unknown, contentType: string): Promise<string | undefined> {
+  if (b === undefined || b === null) return undefined;
+  if (typeof b === 'string') return canonicalText(b, contentType);
+  if (b instanceof URLSearchParams) return canonicalText(b.toString(), 'application/x-www-form-urlencoded');
+  if (typeof FormData !== 'undefined' && b instanceof FormData) return canonicalFormData(b);
+  let bytes: Uint8Array | undefined;
+  if (typeof Blob !== 'undefined' && b instanceof Blob) bytes = new Uint8Array(await b.arrayBuffer());
+  else if (b instanceof ArrayBuffer) bytes = new Uint8Array(b);
+  else if (ArrayBuffer.isView(b)) bytes = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+  if (bytes !== undefined) return `bytes:${createHash('sha256').update(bytes).digest('hex')}`;
+  if (typeof ReadableStream !== 'undefined' && b instanceof ReadableStream) {
+    throw new Error('contract replay: ReadableStream request bodies are not supported (they cannot be hashed without being consumed)');
+  }
+  throw new Error('contract replay: unsupported request body type');
+}
+
+async function requestBody(input: Parameters<typeof fetch>[0], init: RequestInit | undefined): Promise<string | undefined> {
+  const req = input instanceof Request ? input : undefined;
+  const ct = new Headers(init?.headers ?? req?.headers).get('content-type') ?? '';
+  if (init?.body !== undefined && init.body !== null) return canonicalBody(init.body, ct);
+  if (req !== undefined && req.body !== null) {
+    return canonicalBody(ct.toLowerCase().startsWith('multipart/form-data') ? await req.clone().formData() : await req.clone().text(), ct);
+  }
+  return undefined;
 }
 
 async function describeRequest(
   input: Parameters<typeof fetch>[0],
   init: RequestInit | undefined,
-): Promise<{ url: string; method: string; request: RecordedEntry['request']; rawBody: string }> {
+): Promise<{ url: string; method: string; request: RecordedEntry['request'] }> {
   const req = input instanceof Request ? input : undefined;
   const url = req?.url ?? String(input);
   const method = (init?.method ?? req?.method ?? 'GET').toUpperCase();
-  let rawBody = '';
-  const b = init?.body;
-  if (typeof b === 'string') rawBody = b;
-  else if (b instanceof URLSearchParams) rawBody = b.toString();
-  else if (b !== undefined && b !== null) rawBody = await new Response(b).text();
-  else if (req !== undefined && req.body !== null) rawBody = await req.clone().text();
+  const canon = await requestBody(input, init);
   const u = new URL(url);
   const headers: Record<string, string> = {};
   new Headers(init?.headers ?? req?.headers).forEach((v, k) => {
-    headers[k] = v;
+    if (!REQUEST_HEADER_ALLOWLIST.has(k)) return;
+    headers[k] = k === 'content-type' && v.toLowerCase().startsWith('multipart/') ? 'multipart/form-data' : v;
   });
-  const request: RecordedEntry['request'] = { method, path: u.pathname, query: sortedQuery(u.search), headers };
-  if (rawBody !== '') {
-    request.bodyHash = hashBody(rawBody);
-    try {
-      request.body = JSON.parse(rawBody);
-    } catch {
-      request.body = rawBody;
-    }
-  }
-  return { url, method, request, rawBody };
+  const request: RecordedEntry['request'] = { method, path: u.pathname, query: scrubQuery(u.search), headers };
+  if (canon !== undefined) request.bodyHash = hashBody(canon);
+  return { url, method, request };
 }
 
 function loadDir(dir: string): Map<string, RecordedEntry> {
@@ -119,6 +153,20 @@ function recordingFetch(live: typeof fetch, dir: string): typeof fetch {
   };
 }
 
+/** Natural order: digit runs compare numerically, so `v0.10` sorts after `v0.9`. */
+export function naturalCompare(a: string, b: string): number {
+  const pa = a.split(/(\d+)/);
+  const pb = b.split(/(\d+)/);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? '';
+    const y = pb[i] ?? '';
+    if (x === y) continue;
+    if (i % 2 === 1) return Number(x) - Number(y) || (x < y ? -1 : 1);
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
 export interface LiveOrReplayOptions {
   env?: Record<string, string | undefined>;
   /** Defaults to `<cwd>/test/fixtures`. */
@@ -148,12 +196,15 @@ export function liveOrReplay(opts: LiveOrReplayOptions = {}): LiveOrReplay {
   if (url !== undefined && url !== '') {
     const live = opts.liveFetch ?? globalThis.fetch.bind(globalThis);
     const record = env.SP_CONTRACT_RECORD === '1';
-    const f = record ? recordingFetch(live, join(root, version ?? 'unversioned')) : live;
+    if (record && (version === undefined || version === '')) {
+      throw new Error('SP_CONTRACT_RECORD=1 requires SP_CONTRACT_BACKEND_VERSION (the backend tag, used as the fixture folder)');
+    }
+    const f = record ? recordingFetch(live, join(root, version as string)) : live;
     return { fetch: f, mode: 'live', baseUrl: url.replace(/\/+$/, ''), hasFixtures: false };
   }
 
   const versions = existsSync(root)
-    ? readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+    ? readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(naturalCompare)
     : [];
   const chosen = version ?? versions[versions.length - 1];
   const dir = join(root, chosen ?? '');
