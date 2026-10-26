@@ -22,6 +22,9 @@
       ],
       "mfa": [
         "./dist/mfa.d.ts"
+      ],
+      "oauth": [
+        "./dist/oauth.d.ts"
       ]
     }
   },
@@ -64,6 +67,16 @@
       "require": {
         "types": "./dist/mfa.d.cts",
         "default": "./dist/mfa.cjs"
+      }
+    },
+    "./oauth": {
+      "import": {
+        "types": "./dist/oauth.d.ts",
+        "default": "./dist/oauth.js"
+      },
+      "require": {
+        "types": "./dist/oauth.d.cts",
+        "default": "./dist/oauth.cjs"
       }
     }
   },

@@ -331,7 +331,7 @@ Each module is a function that takes the core auth object. **The core (session, 
 | `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | **0.1** |
 | Sessions | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)` | coming later |
 | `oauth_server` | `@sopheak/sp-jwt-auth` (core) | `clientCredentials()` mode | **0.1** |
-| `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode, `introspect`, `revoke` | coming later |
+| `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode (PKCE S256), `introspect`, `revoke` | **0.1** |
 | `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)` | coming later |
 | `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)` | coming later |
 | `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
