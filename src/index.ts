@@ -11,6 +11,8 @@ export { decodeClaims } from './core/claims';
 export type { Claims } from './core/claims';
 export { ensureDeviceId, memoryStore, webStorageStore } from './core/stores';
 export type { TokenStore, Tokens } from './core/stores';
+export { createCrossTab } from './core/crosstab';
+export type { CrossTab, CrossTabDeps, LockManagerLike, TabMessage } from './core/crosstab';
 export { createJwtAuth, userSession } from './core/create-jwt-auth';
 export type {
   AuthEvent,

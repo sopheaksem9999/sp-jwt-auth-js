@@ -1,4 +1,5 @@
 import { SpAuthError, isSpAuthError } from './errors';
+import type { CrossTab } from './crosstab';
 import type { TokenStore, Tokens } from './stores';
 import type { ModeContext } from './types';
 import { findTokenPair, unwrap } from './unwrap';
@@ -89,6 +90,14 @@ export interface TokenRefreshDeps {
   store: TokenStore;
   /** Clears tokens (keeping `deviceId`) and sets state `anonymous`. */
   clearSession(): Promise<void>;
+  /** Cross-tab lock and broadcast (spec §4.5 rule 3); omitted = in-process single flight only. */
+  crossTab?: CrossTab | null;
+  /**
+   * Cookie-transport seam (Task 20): the mode keeps no tokens in the store, so
+   * inside the lock a token another tab broadcast is used instead of refreshing
+   * while it is still outside the refresh-ahead window. Body transport leaves it unset.
+   */
+  useBroadcastedToken?: (b: { accessToken: string; expiresAt: number }) => void;
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
@@ -100,26 +109,36 @@ async function safeGet(store: TokenStore): Promise<Tokens | null> {
 }
 
 /**
- * One refresh-token rotation (spec §4.5 rules 4 and 5): POSTs
- * `{ refresh_token }` to `endpoints.refresh` with device headers and no bearer,
- * stores the new pair (keeping `deviceId`/`csrf`/`lastCompanyId`), updates
- * state and emits `refresh`.
+ * One refresh-token rotation (spec §4.5 rules 3, 4 and 5). The refresh token
+ * stored when the call starts is remembered; the rest runs inside
+ * `crossTab.withLock` (when given):
  *
+ * - First the store is re-read. If it now holds a different refresh token
+ *   (another tab, or another instance, rotated meanwhile) those tokens are
+ *   adopted: state updated, `refresh` emitted with `{ adopted: true }`, no request.
+ * - Otherwise it POSTs `{ refresh_token }` to `endpoints.refresh` with device
+ *   headers and no bearer, stores the new pair (keeping
+ *   `deviceId`/`csrf`/`lastCompanyId`), updates state, emits `refresh` and
+ *   broadcasts the new ACCESS token (never the refresh token) to other tabs.
+ *
+ * Failures:
  * - Refresh 401, or no refresh token stored: clears the session, emits
- *   `session_ended` and throws `SpAuthError('session_ended')`. If the stored
- *   refresh token changed while the request was in flight (a newer session
- *   exists), nothing is cleared and the refresh resolves.
+ *   `session_ended` and throws `SpAuthError('session_ended')`.
+ * - Refresh 401 where the stored refresh token changed while the request was in
+ *   flight (another tab rotated, or a re-login): the stored tokens are adopted,
+ *   `reuse_suspected` is emitted, nothing is cleared and the refresh resolves.
  * - Network error, timeout, 5xx or another 4xx: tokens and state are kept and
  *   the `SpAuthError` is rethrown.
  * - A 2xx without a valid pair: tokens kept, throws `SpAuthError('unknown')`.
  *
- * Every failure emits `refresh_failed` (`status`, `code` only). The request
- * uses the HTTP helper's own controller and timeout, never a caller's signal.
- * If the stored refresh token changed while the request was in flight (logout,
- * login), the response is not stored.
+ * Every failed request emits `refresh_failed` (`status`, `code` only). The
+ * request uses the HTTP helper's own controller and timeout, never a caller's
+ * signal. If the stored refresh token changed while the request was in flight
+ * (logout, login, another tab), the response is not stored.
  */
 export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void> {
   const { ctx, store } = deps;
+  const crossTab = deps.crossTab ?? null;
 
   const endSession = async (status: number, cause?: unknown): Promise<never> => {
     await deps.clearSession();
@@ -133,9 +152,29 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     ctx.emit({ type: 'refresh_failed', status, code });
   };
 
-  return async (): Promise<void> => {
+  /** Uses tokens another tab/instance already stored: state only, no request, no store write. */
+  const adopt = (t: Tokens): void => {
+    if (t.accessToken) ctx.setAuthenticated(t.accessToken);
+  };
+
+  const rotate = async (startedWith: string | undefined): Promise<void> => {
+    if (deps.useBroadcastedToken && crossTab) {
+      const b = crossTab.lastBroadcast();
+      if (b && b.expiresAt - ctx.now() >= (ctx.options.refreshAheadSeconds ?? 60)) {
+        deps.useBroadcastedToken(b);
+        ctx.emit({ type: 'refresh', adopted: true });
+        return;
+      }
+    }
+
     const current = await safeGet(store);
     const sent = current?.refreshToken;
+    if (sent && sent !== startedWith && current.accessToken) {
+      // Rotated by someone else while we waited for the lock: presenting `startedWith` now would be reuse.
+      adopt(current);
+      ctx.emit({ type: 'refresh', adopted: true });
+      return;
+    }
     if (!sent) {
       if (current?.accessToken) await endSession(0);
       throw sessionEndedError(0);
@@ -154,10 +193,15 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     } catch (e) {
       fail(e);
       if (isSpAuthError(e) && e.status === 401) {
-        const latest = (await safeGet(store))?.refreshToken;
-        if (latest === sent) await endSession(401, e);
-        // A newer session (re-login, or a rotation that landed meanwhile) exists: use it.
-        if (latest) return;
+        const latest = await safeGet(store);
+        if (latest?.refreshToken === sent) await endSession(401, e);
+        if (latest?.refreshToken) {
+          // Another tab rotated (or a re-login landed) while this request was in flight:
+          // the server saw our token as reused, but the session continues with the stored pair.
+          adopt(latest);
+          ctx.emit({ type: 'reuse_suspected', status: 401 });
+          return;
+        }
         throw sessionEndedError(401, e);
       }
       throw e;
@@ -178,12 +222,21 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
 
     const latest = await safeGet(store);
     if (latest?.refreshToken !== sent) {
-      // Logged out (or logged in again) meanwhile: do not resurrect the old session.
+      // Logged out (or logged in again, or rotated elsewhere) meanwhile: do not resurrect the old session.
       if (!latest?.refreshToken) throw sessionEndedError(0);
+      adopt(latest);
       return;
     }
-    await store.set(ctx.tokensFromPair(pair, latest));
+    const next = ctx.tokensFromPair(pair, latest);
+    await store.set(next);
     ctx.setAuthenticated(pair.access_token);
     ctx.emit({ type: 'refresh' });
+    crossTab?.broadcast({ type: 'tokens', accessToken: pair.access_token, expiresAt: next.expiresAt ?? 0 });
+  };
+
+  return async (): Promise<void> => {
+    const startedWith = (await safeGet(store))?.refreshToken;
+    if (!crossTab) return rotate(startedWith);
+    return crossTab.withLock(() => rotate(startedWith));
   };
 }

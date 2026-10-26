@@ -1,3 +1,5 @@
+import { createCrossTab } from './crosstab';
+import type { CrossTab } from './crosstab';
 import { SpAuthError } from './errors';
 import { createRefresher, isSessionEnded, performTokenRefresh, waitFor } from './refresh';
 import type { TokenStore, Tokens } from './stores';
@@ -9,6 +11,23 @@ export interface UserSessionOptions {
   storage: TokenStore;
   /** `'body'` (default): refresh token in storage. `'cookie'`: httpOnly cookie (not implemented yet). */
   transport?: 'body' | 'cookie';
+  /**
+   * Cross-tab coordination (spec §4.5 rule 3); on by default. `false` turns
+   * the lock and broadcast off (servers, tests). `key` names the lock
+   * `sp-jwt-auth:refresh:<key>` and the channel; it defaults to the
+   * `webStorageStore` key, else `'default'`. `instance` supplies a ready-made
+   * `CrossTab` (tests, or to `close()` it yourself).
+   */
+  crossTab?: boolean | { key?: string; instance?: CrossTab };
+}
+
+function resolveCrossTab(options: UserSessionOptions): CrossTab | null {
+  const o = options.crossTab;
+  if (o === false) return null;
+  if (typeof o === 'object' && o.instance) return o.instance;
+  const key = (typeof o === 'object' ? o.key : undefined) ?? options.storage.storageKey ?? 'default';
+  // The storage-event fallback only makes sense for a web-storage key.
+  return createCrossTab(key, { storageKey: options.storage.storageKey ?? null });
 }
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
@@ -45,6 +64,12 @@ function bearerFrom(headers: Record<string, string> | undefined): string | null 
  * expired; once expired, the error is rethrown. `handleUnauthorized()` refreshes
  * through the same single flight, unless the failed request's bearer token is
  * already older than the stored one (then it resolves `true` at once).
+ *
+ * Tabs (spec §4.5 rule 3, `crossTab`, on by default): each refresh runs under
+ * the cross-tab lock and first re-reads the store, adopting a pair another tab
+ * already rotated. Login, refresh and every session clear are broadcast (access
+ * token and expiry only); on a message, other instances re-read the shared
+ * store and update their state, so it always follows the store.
  */
 export function userSession(options: UserSessionOptions): AuthMode {
   if (options.transport === 'cookie') {
@@ -58,7 +83,22 @@ export function userSession(options: UserSessionOptions): AuthMode {
   const store = options.storage;
   return {
     kind: 'userSession',
-    create(ctx: ModeContext): ModeRuntime {
+    create(baseCtx: ModeContext): ModeRuntime {
+      const crossTab = resolveCrossTab(options);
+      // Bumped on every local state change, so a sync triggered by another tab never applies a stale read.
+      let generation = 0;
+      const ctx: ModeContext = {
+        ...baseCtx,
+        setAuthenticated(accessToken) {
+          generation++;
+          baseCtx.setAuthenticated(accessToken);
+        },
+        setAnonymous() {
+          generation++;
+          baseCtx.setAnonymous();
+        },
+      };
+
       const clearSession = async (): Promise<void> => {
         const prev = await safeGet(store);
         try {
@@ -68,9 +108,23 @@ export function userSession(options: UserSessionOptions): AuthMode {
           /* stores must not throw; state still goes anonymous */
         }
         ctx.setAnonymous();
+        crossTab?.broadcast({ type: 'logout' });
       };
 
-      const refresher = createRefresher({ perform: performTokenRefresh({ ctx, store, clearSession }) });
+      // Body transport: the shared store is the source of truth, so a message only triggers a re-read.
+      const syncFromStore = async (): Promise<void> => {
+        if (ctx.getState().status === 'unknown') return; // hydration will read the store
+        const seen = generation;
+        const t = await safeGet(store);
+        if (seen !== generation) return;
+        if (t?.accessToken) ctx.setAuthenticated(t.accessToken);
+        else ctx.setAnonymous();
+      };
+      crossTab?.onMessage(() => {
+        void syncFromStore();
+      });
+
+      const refresher = createRefresher({ perform: performTokenRefresh({ ctx, store, clearSession, crossTab }) });
       const refresh = (): Promise<void> => refresher.refresh();
       const aheadSeconds = (): number => ctx.options.refreshAheadSeconds ?? 60;
 
@@ -145,6 +199,7 @@ export function userSession(options: UserSessionOptions): AuthMode {
           const tokens = ctx.tokensFromPair(pair, await safeGet(store));
           await store.set(tokens);
           ctx.setAuthenticated(pair.access_token);
+          crossTab?.broadcast({ type: 'tokens', accessToken: pair.access_token, expiresAt: tokens.expiresAt ?? 0 });
         },
         clearSession,
       };

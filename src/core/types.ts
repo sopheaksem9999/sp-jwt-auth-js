@@ -67,8 +67,10 @@ export type LoginResult = { status: 'authenticated' } | { status: 'second_factor
 
 /**
  * Event passed to `onEvent`. Core emits `login`, `logout` (`everywhere`,
- * optional `remoteError`), `refresh`, `refresh_failed` (`status`, `code`) and
- * `session_ended`; later tasks add their own types. Payloads never carry token
+ * optional `remoteError`), `refresh` (`adopted: true` when another tab's
+ * rotation was used instead of a request), `refresh_failed` (`status`, `code`),
+ * `reuse_suspected` (`status`: a refresh 401 after another tab rotated; the
+ * session continues) and `session_ended`; later tasks add their own types. Payloads never carry token
  * values. Hook errors are swallowed.
  */
 export interface AuthEvent {

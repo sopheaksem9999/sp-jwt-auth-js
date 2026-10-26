@@ -17,6 +17,11 @@ export interface Tokens {
 export interface TokenStore {
   get(): Promise<Tokens | null>;
   set(t: Tokens | null): Promise<void>;
+  /**
+   * Optional key identifying the shared storage location (set, non-enumerable,
+   * by `webStorageStore`). `userSession` uses it to name the cross-tab lock and channel.
+   */
+  readonly storageKey?: string;
 }
 
 /** In-memory store; state is lost on reload. Safe on any runtime. */
@@ -46,10 +51,10 @@ function resolveStorage(kind: 'localStorage' | 'sessionStorage'): WebStorage | n
  * Store backed by `localStorage` or `sessionStorage` under `key`, as JSON.
  * Feature-detected on `globalThis`; every access is guarded, so blocked or
  * missing storage yields `get() -> null` and no-op writes. Corrupt JSON -> null.
- * `set(null)` removes the key.
+ * `set(null)` removes the key. Exposes `key` as a non-enumerable `storageKey`.
  */
 export function webStorageStore(kind: 'localStorage' | 'sessionStorage', key: string): TokenStore {
-  return {
+  const store: TokenStore = {
     get: () => {
       try {
         const raw = resolveStorage(kind)?.getItem(key);
@@ -73,6 +78,9 @@ export function webStorageStore(kind: 'localStorage' | 'sessionStorage', key: st
       return Promise.resolve();
     },
   };
+  // Non-enumerable so the store's shape (and any spread/serialisation of it) is unchanged.
+  Object.defineProperty(store, 'storageKey', { value: key, enumerable: false });
+  return store;
 }
 
 const deviceIds = new WeakMap<TokenStore, Promise<string>>();
