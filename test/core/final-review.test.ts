@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createJwtAuth, userSession } from '../../src/core/create-jwt-auth';
 import type { AuthEvent, JwtAuth, UserSessionOptions } from '../../src/core/create-jwt-auth';
 import { SpAuthError } from '../../src/core/errors';
@@ -205,7 +205,43 @@ function installChannels(): Bus {
   return bus;
 }
 
+type VersionsHolder = { versions?: Record<string, string | undefined> };
+let restoreVersions: (() => void) | null = null;
+
+/** Sets `process.versions.node` (present = a Node-like runtime) for this test; `afterEach` restores it. */
+function setNodeVersion(node: string | undefined): void {
+  const proc = (globalThis as { process?: VersionsHolder }).process;
+  if (!proc) {
+    if (node !== undefined) {
+      vi.stubGlobal('process', { versions: { node } });
+    }
+    return;
+  }
+  const desc = Object.getOwnPropertyDescriptor(proc, 'versions');
+  const next: Record<string, string | undefined> = { ...(proc.versions ?? {}) };
+  if (node === undefined) delete next.node;
+  else next.node = node;
+  Object.defineProperty(proc, 'versions', { value: next, configurable: true, enumerable: true, writable: false });
+  const prev = restoreVersions;
+  restoreVersions = () => {
+    if (desc) Object.defineProperty(proc, 'versions', desc);
+    else delete proc.versions;
+    prev?.();
+  };
+}
+
+/**
+ * A real browser tab: `process.versions.node` empty, which the package treats as "not Node-like"
+ * (whatever the test runner's own runtime is). Empty rather than deleted: Node's own fetch/Headers
+ * (undici) read `process.versions.node.split('.')` lazily and would throw without it.
+ */
+const simulateBrowserRuntime = (): void => setNodeVersion('');
+/** A Node-like server runtime (Node, or Deno/Bun emulating it), made explicit so both vitest projects agree. */
+const simulateNodeRuntime = (): void => setNodeVersion('24.0.0');
+
 afterEach(() => {
+  restoreVersions?.();
+  restoreVersions = null;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -215,6 +251,8 @@ afterEach(() => {
 
 describe('cookie transport: cross-tab is ON by default in a browser tab (any store)', () => {
   const endpoints = { login: '/auth/login' };
+  // These simulate a real browser: the default must not depend on the test runner being Node.
+  beforeEach(() => simulateBrowserRuntime());
 
   /** A browser tab with the cookie transport and NO crossTab / storage options: the defaults under test. */
   function tab(handler: Handler, opts: UserSessionOptions = {}, baseUrl = 'https://api.example.com') {
@@ -365,6 +403,55 @@ describe('cookie transport: cross-tab is ON by default in a browser tab (any sto
     expect(refreshes).toBe(1);
     a.auth.dispose?.();
     b.auth.dispose?.();
+  });
+});
+
+describe('cookie transport: no default cross-tab in a Node-like runtime, even with a global document', () => {
+  const endpoints = { login: '/auth/login' };
+  beforeEach(() => simulateNodeRuntime());
+
+  function client(handler: Handler, opts: UserSessionOptions = {}) {
+    const { fetch, calls } = fakeFetch(handler);
+    const auth = createJwtAuth({ baseUrl: 'https://api.example.com', endpoints, mode: userSession({ transport: 'cookie', ...opts }), fetch });
+    return { auth, calls };
+  }
+
+  it('jsdom-style server: no channel, no Web Lock, and two users never share a token', async () => {
+    vi.stubGlobal('document', { cookie: 'sp_csrf=c1' }); // e.g. global-jsdom registered on the server
+    const request = vi.fn();
+    vi.stubGlobal('navigator', { locks: { request } });
+    const bus = installChannels();
+    let n = 0;
+    const tokens = [fresh1, fresh3];
+    const handler: Handler = (c) =>
+      c.path === '/auth/login' ? json(pair(fresh2), 200, { 'X-SP-CSRF': 'c-login' }) : json(pair(tokens[n++]!), 200, { 'X-SP-CSRF': `c${n + 1}` });
+    const userA = client(handler);
+    const userB = client(handler);
+    await userA.auth.restore();
+    await userB.auth.restore();
+    expect(n).toBe(2); // each refreshed for itself
+    expect(await userA.auth.getAccessToken()).toBe(fresh1);
+    expect(await userB.auth.getAccessToken()).toBe(fresh3);
+    await userA.auth.login({}); // a later token for user A reaches nobody else
+    await flush();
+    expect(await userA.auth.getAccessToken()).toBe(fresh2);
+    expect(await userB.auth.getAccessToken()).toBe(fresh3);
+    expect(request).not.toHaveBeenCalled();
+    expect(bus.names).toEqual([]);
+    expect(bus.posted).toEqual([]);
+  });
+
+  it('an explicit crossTab: true is still honoured (e.g. an Electron renderer)', async () => {
+    vi.stubGlobal('document', { cookie: 'sp_csrf=c1' });
+    const locks = fakeLocks();
+    vi.stubGlobal('navigator', { locks });
+    const bus = installChannels();
+    const a = client(() => json(pair(fresh1), 200, { 'X-SP-CSRF': 'c2' }), { crossTab: true });
+    await a.auth.restore();
+    expect(a.auth.getState().status).toBe('authenticated');
+    expect(locks.granted).toEqual(['sp-jwt-auth:refresh:default']);
+    expect(bus.names).toEqual(['sp-jwt-auth:tabs:default']);
+    a.auth.dispose?.();
   });
 });
 

@@ -128,8 +128,11 @@ describe('browser globals (spec §10)', () => {
   });
 });
 
-/** Node-global allow-list: empty. Add a file only with a reason, after reporting why it needs a Node global. */
-const NODE_ALLOWED: Record<string, string> = {};
+/** Node-global allow-list: kept minimal. Add a file only with a reason, after reporting why it needs a Node global. */
+const NODE_ALLOWED: Record<string, string> = {
+  'src/core/cookie.ts':
+    'server-runtime detection for the default cross-tab (process.versions.node, guarded); never used for control flow beyond that',
+};
 /** Directories that are Node-only by design and never part of a browser/edge entry. */
 const NODE_ONLY_DIRS: string[] = [];
 
@@ -157,7 +160,12 @@ describe('Node globals (spec §7 edge intent)', () => {
       if (NODE_ONLY_DIRS.some((d) => f.startsWith(d))) continue;
       const refs = globalRefs(f, readFileSync(join(root, f), 'utf8'), NODE_GLOBALS, false);
       if (refs.length && !(f in NODE_ALLOWED)) offenders.push(...refs.map((r) => `${f}:${r}`));
+      if (f in NODE_ALLOWED) {
+        // The allow-listed file holds exactly the one feature-detect site, nothing more.
+        expect(refs, f).toHaveLength(1);
+      }
     }
     expect(offenders).toEqual([]);
+    for (const f of Object.keys(NODE_ALLOWED)) expect(srcFiles(), f).toContain(f);
   });
 });

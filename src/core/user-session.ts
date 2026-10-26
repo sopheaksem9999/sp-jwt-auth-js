@@ -38,12 +38,18 @@ export interface UserSessionOptions {
   /**
    * Cross-tab coordination (spec §4.5 rule 3).
    * - Default: ON for a `webStorageStore` (lock and channel named after its
-   *   key). Cookie transport in a browser tab (a `document`, and Web Locks or
-   *   `BroadcastChannel`): ON for any store, keyed by the cookie's scope
+   *   key). Cookie transport in a REAL browser tab (a `document`, Web Locks or
+   *   `BroadcastChannel`, and not a Node-like runtime: `process.versions.node`
+   *   unset): ON for any store, keyed by the cookie's scope
    *   (`cookie:<origin of baseUrl>`, `cookie:<location.origin>` for a relative
    *   `baseUrl`, else `cookie:default`), because every tab shares the one
    *   httpOnly refresh cookie and two tabs refreshing it at once would trip the
-   *   server's reuse detection. Otherwise (a memory or custom store with the body
+   *   server's reuse detection. A server or SSR process never gets that default,
+   *   even with a global `document` (jsdom, happy-dom); pass `crossTab: false`
+   *   there. Electron renderers (Node-like, but a real browser) pass `crossTab: true`.
+   *   A browser with neither Web Locks nor `BroadcastChannel` falls back to the
+   *   per-instance mutex, so tabs can still rotate the cookie at once (known limit).
+   *   Otherwise (a memory or custom store with the body
    *   transport, or any server) there is no cross-tab identity, so the default is
    *   a store-scoped in-process lock only (instances over the SAME store object
    *   serialise; no channel, no globals). That keeps per-request sessions on a

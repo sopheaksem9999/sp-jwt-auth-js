@@ -69,14 +69,32 @@ function hasTabCoordination(): boolean {
 }
 
 /**
- * Default cross-tab key for the cookie transport in a browser tab, derived from
- * the cookie's scope: `cookie:<origin of baseUrl>`; for a relative `baseUrl`,
- * the origin it resolves to against `location.origin`, else `cookie:default`.
- * `undefined` (store-scoped coordinator) without a `document`, or without Web
- * Locks and `BroadcastChannel`: servers never get a process-wide lock or channel.
+ * `true` in a Node-like runtime (`process.versions.node` is set: Node, and Deno
+ * and Bun, which emulate it). Used ONLY to keep the cookie transport's DEFAULT
+ * cross-tab key off servers that install a global `document` (jsdom, happy-dom,
+ * SSR shims): there `document`, `navigator.locks` and `BroadcastChannel` all
+ * exist, and a process-wide lock and channel would share tokens between users.
+ * Never used for any other decision; an explicit `crossTab` is always honoured.
+ */
+function isNodeLikeRuntime(): boolean {
+  try {
+    const v = (globalThis as { process?: { versions?: { node?: unknown } } }).process?.versions?.node;
+    return typeof v === 'string' && v !== '';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default cross-tab key for the cookie transport in a real browser tab, derived
+ * from the cookie's scope: `cookie:<origin of baseUrl>`; for a relative
+ * `baseUrl`, the origin it resolves to against `location.origin`, else
+ * `cookie:default`. `undefined` (store-scoped coordinator) without a `document`,
+ * in a Node-like runtime even with a global `document`, or without Web Locks and
+ * `BroadcastChannel`: servers never get a process-wide lock or channel by default.
  */
 function cookieScopeKey(baseUrl: string): string | undefined {
-  if (!hasDocument() || !hasTabCoordination()) return undefined;
+  if (!hasDocument() || isNodeLikeRuntime() || !hasTabCoordination()) return undefined;
   try {
     return `cookie:${new URL(baseUrl).origin}`;
   } catch {
@@ -188,10 +206,17 @@ function hasSecrets(t: Tokens | null): boolean {
  * - **Logout.** Local state first (CSRF cleared, `deviceId` kept), then
  *   `endpoints.logout` or `/auth/token/revoke` with the bearer (when one was
  *   held) AND the cookie plus `X-SP-CSRF`; a 401 means already logged out.
- * - **Tabs, and servers.** In a browser tab (a `document`, and Web Locks or
- *   `BroadcastChannel`) cross-tab coordination is ON by default for ANY store,
- *   keyed by the cookie's scope (`cookie:<origin of baseUrl>`), since every tab
- *   refreshes through the same httpOnly cookie; `crossTab: false` turns it off.
+ * - **Tabs, and servers.** In a real browser tab (a `document`, Web Locks or
+ *   `BroadcastChannel`, and NOT a Node-like runtime) cross-tab coordination is
+ *   ON by default for ANY store, keyed by the cookie's scope (`cookie:<origin
+ *   of baseUrl>`), since every tab refreshes through the same httpOnly cookie;
+ *   `crossTab: false` turns it off. A server or SSR process never gets this
+ *   default, even when it defines a global `document` (jsdom, happy-dom): it
+ *   should pass `crossTab: false` and must not rely on cross-tab behaviour.
+ *   Electron renderers (Node-like and a real browser) pass `crossTab: true`. A
+ *   browser with neither Web Locks nor `BroadcastChannel` falls back to the
+ *   per-instance mutex, so several tabs can still rotate the cookie at once
+ *   (known limit).
  *   Tokens and CSRF values are broadcast, and broadcast ones consumed, only in a
  *   real tab context: a `document`, a working `BroadcastChannel`/`storage`-event
  *   path, a cross-tab key (explicit, the cookie-scope default, or a
