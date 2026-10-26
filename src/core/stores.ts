@@ -23,7 +23,7 @@ export interface TokenStore {
 export function memoryStore(): TokenStore {
   let current: Tokens | null = null;
   return {
-    get: () => Promise.resolve(current ? { ...current } : null),
+    get: () => Promise.resolve(current ? { ...current } : null), // copies: callers cannot alias state
     set: (t) => {
       current = t ? { ...t } : null;
       return Promise.resolve();
@@ -75,26 +75,44 @@ export function webStorageStore(kind: 'localStorage' | 'sessionStorage', key: st
   };
 }
 
+const deviceIds = new WeakMap<TokenStore, Promise<string>>();
+
+async function safeGet(store: TokenStore): Promise<Tokens | null> {
+  try {
+    return await store.get();
+  } catch {
+    return null;
+  }
+}
+
+async function resolveDeviceId(store: TokenStore): Promise<string> {
+  const existing = (await safeGet(store))?.deviceId;
+  if (existing) return existing;
+  const generated = globalThis.crypto.randomUUID();
+  // Merge against a fresh read, not the earlier snapshot, so concurrent token writes are not clobbered.
+  const fresh = await safeGet(store);
+  if (fresh?.deviceId) return fresh.deviceId;
+  try {
+    await store.set({ ...(fresh ?? {}), deviceId: generated });
+  } catch {
+    /* not persisted; the per-store memo still keeps the id stable for this session */
+  }
+  return generated;
+}
+
 /**
  * Returns the persisted `deviceId`, or generates one with Web Crypto
- * (`crypto.randomUUID()`), stores it (other fields preserved) and returns it.
- * Repeat calls return the same id. Logout clears tokens but keeps `deviceId`:
- * `set(null)` then `set({ deviceId })`. If the store cannot persist, a fresh
- * in-memory id is returned, which is NOT stable across reloads.
+ * (`crypto.randomUUID()`), stores it (other fields preserved, merged against a
+ * fresh read) and returns it. Concurrent and repeat calls on the same store
+ * instance share one memoised id. The id is stable per store instance within a
+ * session; stable across reloads only if the store persists. Logout clears
+ * tokens but keeps `deviceId`: `set(null)` then `set({ deviceId })`.
  */
-export async function ensureDeviceId(store: TokenStore): Promise<string> {
-  let current: Tokens | null = null;
-  try {
-    current = await store.get();
-  } catch {
-    current = null;
+export function ensureDeviceId(store: TokenStore): Promise<string> {
+  let p = deviceIds.get(store);
+  if (!p) {
+    p = resolveDeviceId(store);
+    deviceIds.set(store, p);
   }
-  if (current?.deviceId) return current.deviceId;
-  const deviceId = globalThis.crypto.randomUUID();
-  try {
-    await store.set({ ...(current ?? {}), deviceId });
-  } catch {
-    /* not persisted; id valid for this call only */
-  }
-  return deviceId;
+  return p;
 }
