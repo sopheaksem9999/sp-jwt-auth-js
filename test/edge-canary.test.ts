@@ -8,8 +8,9 @@ import { describe, expect, it } from 'vitest';
 // Why `EdgeRuntime` and not `process` / `require`: vitest's edge-runtime environment copies the edge VM globals
 // onto the Node worker's global, so `process`, `Buffer` and `setImmediate` stay visible and `require` is
 // undefined in every ESM test file in both projects (probed on vitest 5.0.3 + @edge-runtime/vm 5.0.0). Only the
-// `EdgeRuntime` global, which the edge VM defines and Node never does, tells the two apart. The guard against
-// Node built-ins in shipped code is therefore check-dist.mjs / check-bundle.mjs, not this project.
+// `EdgeRuntime` global, which the edge VM defines and Node never does, tells the two apart. So this project does
+// not guard against Node-only code: Node built-in imports are caught by check-dist.mjs / check-bundle.mjs, and
+// Node globals (`process`, `Buffer`, `require`, ...) in src/ by test/acceptance/globals.node.test.ts.
 const g = globalThis as { EdgeRuntime?: unknown; process?: { versions?: { node?: string } } };
 
 describe('edge canary', () => {

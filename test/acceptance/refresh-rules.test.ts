@@ -1,20 +1,13 @@
 // Spec §7 coverage: "Rule 4.5 has a test per numbered point." One thin scenario per bullet of §4.5, through the
 // PUBLIC API only (the package entry, as an app imports it), titled with the rule it proves. The deep cases live
-// in the suites named in RULE_MAP; this file is the map plus a fast end-to-end check of each rule.
+// in the suites named in RULE_MAP (test/acceptance/rule-map.ts, checked against those files by
+// refresh-rules-map.node.test.ts); this file is a fast end-to-end check of each rule.
 // Edge-safe (runs in both vitest projects).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clientCredentials, createCrossTab, createJwtAuth, memoryStore, presets, userSession } from '../../src';
 import type { AuthEvent, CrossTab, JwtAuthOptions, LockManagerLike, TokenStore, Tokens } from '../../src';
+import { RULE_MAP } from './rule-map';
 
-/** §4.5 rule → the deep tests that cover its edge cases (file: describe / it). */
-export const RULE_MAP = {
-  'rule 1: proactive refresh': ['test/core/refresh.test.ts: proactive refresh in getAccessToken (ahead window, custom ahead, exp in the past, expires_in fallback, JWT exp wins)'],
-  'rule 2: single-flight in a process': ['test/core/refresh.test.ts: createRefresher; handleUnauthorized "concurrent calls share one refresh"; "getAccessToken and handleUnauthorized running together share one flight"'],
-  'rule 3: single-flight across tabs': ['test/core/crosstab.test.ts: two instances sharing a store (two tabs)', 'test/core/cookie.test.ts: cookie transport: tabs; broadcast grace after a contended lock'],
-  'rule 4: old access tokens die on rotation, retried once': ['test/core/refresh.test.ts: handleUnauthorized with the failed request', 'test/core/presets.test.ts: whoami "retries once after a 401" / "does not retry twice"'],
-  'rule 5: refresh failure semantics': ['test/core/refresh.test.ts: refresh failure (401 ends the session; network/5xx/4xx keep tokens)'],
-  'rule 6: clientCredentials': ['test/core/modes.test.ts: clientCredentials (expires_in 0 → defaultTtlSeconds, refreshAheadSeconds renewal, 50 concurrent → 1, concurrent 401s)'],
-} as const;
 
 const b64url = (s: string): string => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const now = (): number => Math.floor(Date.now() / 1000);

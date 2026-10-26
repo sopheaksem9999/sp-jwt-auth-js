@@ -1,4 +1,8 @@
 // Spec §10: no `window`, `document`, `localStorage` (and friends) outside the files that feature-detect them.
+// Spec §7 (edge intent): no Node globals (`process`, `Buffer`, `require`, `__dirname`, `__filename`,
+// `setImmediate`, `global`) in src/** either. The vitest `edge` project cannot catch those (its environment leaves
+// the Node worker's globals visible; see test/edge-canary.test.ts), so this scan is the guard for them, as
+// check-dist.mjs / check-bundle.mjs are for `node:` and bare built-in imports.
 // An AST scan (TypeScript compiler API) of src/**: a reference is an identifier read in value position (type-only
 // uses are erased and never touch the global), a property read off a global object (`globalThis.document`,
 // `(globalThis as X).document`, `self['localStorage']`), any computed read off a global object
@@ -14,7 +18,8 @@ import { describe, expect, it } from 'vitest';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const BROWSER_GLOBALS = new Set(['window', 'document', 'localStorage', 'sessionStorage', 'navigator', 'BroadcastChannel']);
-const GLOBAL_OBJECTS = new Set(['globalThis', 'self', 'window']);
+const NODE_GLOBALS = new Set(['process', 'Buffer', 'require', '__dirname', '__filename', 'setImmediate', 'global']);
+const GLOBAL_OBJECTS = new Set(['globalThis', 'self', 'window', 'global']);
 
 /** Files allowed to reference browser globals, each feature-detecting (guarded `typeof`/try, safe without them). */
 const ALLOWED: Record<string, string> = {
@@ -45,15 +50,19 @@ function inTypePosition(n: ts.Node): boolean {
   return false;
 }
 
-/** Browser-global references in one source text, as `line: what`. */
-function browserGlobalRefs(fileName: string, text: string): string[] {
+/**
+ * References to the global `names` in one source text, as `line: what`. `literals`: also count the names as
+ * string literals in value position and any computed read off a global object (the browser scan: code reaches
+ * those names as `globalThis[kind]`); the Node scan counts only identifiers and named/literal-keyed reads.
+ */
+function globalRefs(fileName: string, text: string, names: Set<string> = BROWSER_GLOBALS, literals = true): string[] {
   const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const out: string[] = [];
   const at = (n: ts.Node, what: string): void => {
     out.push(`${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${what}`);
   };
   const visit = (n: ts.Node): void => {
-    if (ts.isIdentifier(n) && BROWSER_GLOBALS.has(n.text) && !inTypePosition(n)) {
+    if (ts.isIdentifier(n) && names.has(n.text) && !inTypePosition(n)) {
       const p = n.parent;
       const isMemberName = (ts.isPropertyAccessExpression(p) && p.name === n) || ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p) || ts.isMethodDeclaration(p) || ts.isPropertySignature(p)) && p.name === n);
       if (isMemberName) {
@@ -65,12 +74,13 @@ function browserGlobalRefs(fileName: string, text: string): string[] {
     if (ts.isElementAccessExpression(n) && isGlobalObject(n.expression)) {
       const k = n.argumentExpression;
       if (ts.isStringLiteralLike(k)) {
-        if (BROWSER_GLOBALS.has(k.text)) at(n, `global['${k.text}']`);
-      } else {
+        if (names.has(k.text)) at(n, `global['${k.text}']`);
+      } else if (literals) {
+        // Browser scan only: a computed key can reach any browser global (stores.ts `globalThis[kind]`).
         at(n, 'global[<computed>]');
       }
     }
-    if (ts.isStringLiteralLike(n) && BROWSER_GLOBALS.has(n.text) && !inTypePosition(n) && !ts.isElementAccessExpression(n.parent)) {
+    if (literals && ts.isStringLiteralLike(n) && names.has(n.text) && !inTypePosition(n) && !ts.isElementAccessExpression(n.parent)) {
       at(n, `'${n.text}' literal`);
     }
     ts.forEachChild(n, visit);
@@ -87,7 +97,7 @@ function srcFiles(): string[] {
 
 describe('browser globals (spec §10)', () => {
   it('the scanner sees every reference form and ignores types and comments (non-vacuous)', () => {
-    const hits = (s: string): number => browserGlobalRefs('x.ts', s).length;
+    const hits = (s: string): number => globalRefs('x.ts', s).length;
     expect(hits('window.location.href;')).toBe(1);
     expect(hits('const c = document.cookie;')).toBe(1);
     expect(hits('localStorage.getItem("k");')).toBe(1);
@@ -107,7 +117,7 @@ describe('browser globals (spec §10)', () => {
     const offenders: string[] = [];
     const seenAllowed = new Set<string>();
     for (const f of srcFiles()) {
-      const refs = browserGlobalRefs(f, readFileSync(join(root, f), 'utf8'));
+      const refs = globalRefs(f, readFileSync(join(root, f), 'utf8'));
       if (refs.length === 0) continue;
       if (f in ALLOWED) seenAllowed.add(f);
       else offenders.push(...refs.map((r) => `${f}:${r}`));
@@ -115,5 +125,39 @@ describe('browser globals (spec §10)', () => {
     expect(offenders).toEqual([]);
     // Every allowed file must still reference one, or it comes off the list.
     expect(Object.keys(ALLOWED).filter((f) => !seenAllowed.has(f))).toEqual([]);
+  });
+});
+
+/** Node-global allow-list: empty. Add a file only with a reason, after reporting why it needs a Node global. */
+const NODE_ALLOWED: Record<string, string> = {};
+/** Directories that are Node-only by design and never part of a browser/edge entry. */
+const NODE_ONLY_DIRS: string[] = [];
+
+describe('Node globals (spec §7 edge intent)', () => {
+  const nodeRefs = (s: string): number => globalRefs('x.ts', s, NODE_GLOBALS, false).length;
+
+  it('the scanner sees every Node-global form and ignores types, comments and strings (non-vacuous)', () => {
+    expect(nodeRefs('const e = process.env.X;')).toBe(1);
+    expect(nodeRefs('if (typeof process !== "undefined") {}')).toBe(1);
+    expect(nodeRefs('const b = Buffer.from("x");')).toBe(1);
+    expect(nodeRefs('const fs = require("fs");')).toBe(1);
+    expect(nodeRefs('const d = __dirname + __filename;')).toBe(2);
+    expect(nodeRefs('setImmediate(() => {});')).toBe(1);
+    expect(nodeRefs('global.x = 1;')).toBe(1);
+    expect(nodeRefs('const p = globalThis.process;')).toBe(1);
+    expect(nodeRefs('const p = (globalThis as { Buffer?: unknown }).Buffer;')).toBe(1);
+    expect(nodeRefs("const p = globalThis['process'];")).toBe(1);
+    expect(nodeRefs('// process.env in a comment\nconst s = "tenant.global"; const o = { process: 1 }; o.process;')).toBe(0);
+    expect(nodeRefs('let b: Buffer | null = null; type P = typeof process;')).toBe(0);
+  });
+
+  it('src/** references none of them outside the Node-only directories', () => {
+    const offenders: string[] = [];
+    for (const f of srcFiles()) {
+      if (NODE_ONLY_DIRS.some((d) => f.startsWith(d))) continue;
+      const refs = globalRefs(f, readFileSync(join(root, f), 'utf8'), NODE_GLOBALS, false);
+      if (refs.length && !(f in NODE_ALLOWED)) offenders.push(...refs.map((r) => `${f}:${r}`));
+    }
+    expect(offenders).toEqual([]);
   });
 });

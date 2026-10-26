@@ -1,6 +1,6 @@
 # @sopheak/sp-jwt-auth
 
-Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (`@sopheak/sp-jwt-auth/verify`).
+Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (`@sopheak/sp-jwt-auth/verify`). CI runs the suite on Node 20, 22 and 24, on Deno and Bun, and under `@edge-runtime/vm`. The edge run proves the code works with the edge web globals, but it cannot block Node globals (vitest leaves `process` and `Buffer` visible there), so an AST scan of `src/` and the dist and browser-bundle checks are what keep Node-only code out.
 
 > Status: **0.1, core only.** The core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport) and the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`) are what this release ships. Everything marked "coming later" below is **not available yet**; do not build on it.
 

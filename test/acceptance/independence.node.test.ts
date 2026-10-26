@@ -58,37 +58,68 @@ describe('independence: no import of the other package', () => {
   });
 });
 
+/** Copies package.json + dist into `<dir>/node_modules/<SELF>`: no workspace links, no dependencies. */
+function installAlone(dir: string): void {
+  const pkgDir = join(dir, 'node_modules', ...SELF.split('/'));
+  mkdirSync(pkgDir, { recursive: true });
+  cpSync(join(root, 'package.json'), join(pkgDir, 'package.json'));
+  cpSync(join(root, 'dist'), join(pkgDir, 'dist'), { recursive: true });
+  writeFileSync(join(dir, 'package.json'), '{"name":"independence-probe","private":true}');
+}
+
+/**
+ * Runs Node in `dir` with a clean NODE_PATH: exits 2 with "OTHER_RESOLVABLE" when OTHER resolves from there, else
+ * require()s and import()s SELF and checks its main export, printing "independent-ok".
+ */
+function probe(dir: string): { status: number | null; stdout: string; stderr: string } {
+  const script = [
+    `let otherFound = true; try { require.resolve(${JSON.stringify(OTHER)}); } catch { otherFound = false; }`,
+    "if (otherFound) { console.error('OTHER_RESOLVABLE'); process.exit(2); }",
+    `const cjs = require(${JSON.stringify(SELF)});`,
+    `import(${JSON.stringify(SELF)}).then((esm) => {`,
+    "  for (const m of [cjs, esm]) if (typeof m.createJwtAuth !== 'function') throw new Error('createJwtAuth missing');",
+    "  console.log('independent-ok');",
+    '}).catch((e) => { console.error(e); process.exit(1); });',
+  ].join('\n');
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_PATH: '' };
+  delete env.NODE_OPTIONS;
+  // Under Deno or Bun (running this suite), process.execPath is that runtime: the probe is a Node install check.
+  const nodeBin = /[\\/]node(\.exe)?$/.test(process.execPath) ? process.execPath : 'node';
+  const r = spawnSync(nodeBin, ['-e', script], { cwd: dir, env, encoding: 'utf8' });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+function requireDist(skip: (note?: string) => void): void {
+  if (!existsSync(join(root, 'dist', 'index.cjs'))) {
+    if (process.env.REQUIRE_DIST === '1') throw new Error('dist/ is missing; run pnpm build (REQUIRE_DIST=1)');
+    skip('dist/ not built');
+  }
+}
+
 describe(`${SELF} works without ${OTHER} installed`, () => {
   const tmp = mkdtempSync(join(tmpdir(), 'sp-independence-'));
   afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
   it('require() and import() of the main entry from a directory holding only this package', ({ skip }) => {
-    if (!existsSync(join(root, 'dist', 'index.cjs'))) {
-      if (process.env.REQUIRE_DIST === '1') throw new Error('dist/ is missing; run pnpm build (REQUIRE_DIST=1)');
-      skip('dist/ not built');
-    }
-    // node_modules/<SELF> = package.json + dist only: no workspace links, no dependencies, no OTHER.
-    const pkgDir = join(tmp, 'node_modules', ...SELF.split('/'));
-    mkdirSync(pkgDir, { recursive: true });
-    cpSync(join(root, 'package.json'), join(pkgDir, 'package.json'));
-    cpSync(join(root, 'dist'), join(pkgDir, 'dist'), { recursive: true });
-    writeFileSync(join(tmp, 'package.json'), '{"name":"independence-probe","private":true}');
-    const script = [
-      `const cjs = require('${SELF}');`,
-      "let otherFound = true; try { require.resolve('${other}'); } catch { otherFound = false; }",
-      "if (otherFound) throw new Error('the other package is resolvable from the probe directory');",
-      `import('${SELF}').then((esm) => {`,
-      `  for (const m of [cjs, esm]) if (typeof m.createJwtAuth !== 'function') throw new Error('createJwtAuth missing');`,
-      "  console.log('independent-ok');",
-      '}).catch((e) => { console.error(e); process.exit(1); });',
-    ].join('\n');
-    const env: NodeJS.ProcessEnv = { ...process.env, NODE_PATH: '' };
-    delete env.NODE_OPTIONS;
-    // Under Deno or Bun (running this suite), process.execPath is that runtime: the probe is a Node install check.
-    const nodeBin = /[\\/]node(\.exe)?$/.test(process.execPath) ? process.execPath : 'node';
-    const r = spawnSync(nodeBin, ['-e', script], { cwd: tmp, env, encoding: 'utf8' });
+    requireDist(skip);
+    const dir = join(tmp, 'alone');
+    installAlone(dir);
+    const r = probe(dir);
     expect(r.stderr).toBe('');
     expect(r.stdout.trim()).toBe('independent-ok');
     expect(r.status).toBe(0);
+  });
+
+  it(`the probe detects ${OTHER} when it IS resolvable (non-vacuous)`, ({ skip }) => {
+    requireDist(skip);
+    const dir = join(tmp, 'with-other');
+    installAlone(dir);
+    const otherDir = join(dir, 'node_modules', ...OTHER.split('/'));
+    mkdirSync(otherDir, { recursive: true });
+    writeFileSync(join(otherDir, 'package.json'), JSON.stringify({ name: OTHER, version: '0.0.0', main: 'index.js' }));
+    writeFileSync(join(otherDir, 'index.js'), 'module.exports = {};');
+    const r = probe(dir);
+    expect(r.stderr.trim()).toBe('OTHER_RESOLVABLE');
+    expect(r.status).toBe(2);
   });
 });
