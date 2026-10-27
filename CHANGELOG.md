@@ -1,5 +1,14 @@
 # @sokpheak/sp-jwt-auth
 
+## 0.2.0
+
+### Minor Changes
+
+- Enhanced session lifecycle and hydration observability:
+  - Added strongly-typed `SessionEndReason` (`'manual_logout' | 'cross_tab_logout' | 'token_expired' | 'refresh_rejected' | 'storage_cleared'`) and typed `SessionEndedEvent` payload emitted on `session_ended` events.
+  - Added synchronous `isHydrated(): boolean` check on auth instance to distinguish between active initialization and unauthenticated state.
+  - Added explicit `ready(): Promise<UserSession | null>` method for awaiting hydration.
+
 ## 0.1.1
 
 ### Patch Changes
