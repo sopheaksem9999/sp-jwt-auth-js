@@ -8,6 +8,24 @@ permissions:
   contents: read
 
 jobs:
+  # Secret scan of the full git history, before anything is built or published. gitleaks is pinned by version
+  # and its release checksum (published in gitleaks_8.30.1_checksums.txt); `.gitleaks.toml` extends the default rules.
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks 8.30.1 (checksum verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tgz" -C "$RUNNER_TEMP" gitleaks
+      - name: Scan history and working tree
+        run: |
+          "$RUNNER_TEMP/gitleaks" git . --config .gitleaks.toml --redact --no-banner --verbose --exit-code 1
+          "$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --verbose --exit-code 1
   # Spec §7 runtime matrix. Node 22 / 24: the full suite (node + edge vitest projects), the edge canary and
   # `pnpm check` (build, publint, attw, check-dist, check-modules, check-bundle, CJS + ESM smoke imports).
   node:

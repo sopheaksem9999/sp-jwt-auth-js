@@ -1,0 +1,10 @@
+title = "sp-jwt-auth-js gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Obviously fake fixture values used by the test-suite"
+regexes = [
+  '''spk_live_abcdef123456''',
+]

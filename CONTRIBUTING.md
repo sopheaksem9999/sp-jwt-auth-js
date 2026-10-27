@@ -15,3 +15,7 @@
 - Stable: when the beta is proven, run `pnpm changeset pre exit` and `pnpm changeset version` on `develop`, merge `develop` into `main` and push. A version without a suffix releases only from `main`, to `latest`.
 - A push whose version already has a tag, or whose version belongs to the other branch, is skipped, so ordinary pushes never publish. Nothing is published unless the version was bumped.
 - Never force-push, and never move or delete a published tag.
+
+## Secret scanning
+
+- CI and the release workflow run gitleaks over the full git history and the working tree (`.gitleaks.toml` extends the default rules). A finding blocks the release. Run `gitleaks git . --config .gitleaks.toml --redact` locally before pushing. Never commit real keys; test fixtures use obviously fake values, and an allowlist entry in `.gitleaks.toml` must name the exact fake value.
