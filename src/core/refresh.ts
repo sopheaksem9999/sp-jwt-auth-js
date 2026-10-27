@@ -152,7 +152,11 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
 
   const endSession = async (status: number, cause?: unknown): Promise<never> => {
     await deps.clearSession();
-    ctx.emit({ type: 'session_ended' });
+    ctx.emit({
+      type: 'session_ended',
+      reason: status === 401 ? 'refresh_rejected' : 'token_expired',
+      status,
+    });
     throw sessionEndedError(status, cause);
   };
 

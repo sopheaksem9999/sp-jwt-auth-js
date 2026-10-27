@@ -528,7 +528,7 @@ export function cookieSession(options: UserSessionOptions): AuthMode {
             }
             fail(e);
             await clear({ broadcast: true, sentCsrf: sent });
-            ctx.emit({ type: 'session_ended' });
+            ctx.emit({ type: 'session_ended', reason: 'refresh_rejected', status: 401 });
             throw sessionEndedError(401, e);
           }
           if (isSpAuthError(e) && e.status === 403) {
@@ -582,6 +582,7 @@ export function cookieSession(options: UserSessionOptions): AuthMode {
       const onTabMessage = async (m: TabMessage): Promise<void> => {
         if (!tabContext()) return;
         if (m.type === 'logout') {
+          const wasAuth = ctx.getState().status === 'authenticated';
           clears++;
           access = null;
           expiresAt = undefined;
@@ -591,6 +592,9 @@ export function cookieSession(options: UserSessionOptions): AuthMode {
             await writeStore((t) => {
               delete t.csrf;
             });
+          }
+          if (wasAuth) {
+            ctx.emit({ type: 'session_ended', reason: 'cross_tab_logout' });
           }
           return;
         }

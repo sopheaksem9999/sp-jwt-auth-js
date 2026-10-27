@@ -66,17 +66,41 @@ export interface Challenge {
 export type LoginResult = { status: 'authenticated' } | { status: 'second_factor_required'; challenge: Challenge };
 
 /**
+ * Reason why a session ended.
+ */
+export type SessionEndReason =
+  | 'manual_logout'
+  | 'cross_tab_logout'
+  | 'token_expired'
+  | 'refresh_rejected'
+  | 'storage_cleared';
+
+/**
+ * Event payload emitted when a session ends.
+ */
+export interface SessionEndedEvent {
+  type: 'session_ended';
+  reason: SessionEndReason;
+  status?: number;
+  [k: string]: unknown;
+}
+
+/**
  * Event passed to `onEvent`. Core emits `login`, `logout` (`everywhere`,
  * optional `remoteError: { status, code }` of a failed server-side revoke), `refresh` (`adopted: true` when another tab's
  * rotation was used instead of a request), `refresh_failed` (`status`, `code`),
  * `reuse_suspected` (`status`: a refresh 401 after another tab rotated; the
- * session continues) and `session_ended`; later tasks add their own types. Payloads never carry token
+ * session continues) and `session_ended` (`reason`, optional `status`). Payloads never carry token
  * values. Hook errors are swallowed.
  */
-export interface AuthEvent {
-  type: string;
-  [k: string]: unknown;
-}
+export type AuthEvent =
+  | { type: 'login'; secondFactor?: boolean; [k: string]: unknown }
+  | { type: 'logout'; everywhere: boolean; remoteError?: { status: number; code: string }; [k: string]: unknown }
+  | { type: 'refresh'; adopted?: boolean; [k: string]: unknown }
+  | { type: 'refresh_failed'; status: number; code: string; [k: string]: unknown }
+  | { type: 'reuse_suspected'; status: number; [k: string]: unknown }
+  | SessionEndedEvent
+  | { type: string; [k: string]: unknown };
 
 /**
  * Optional argument to `handleUnauthorized`: the failed request's `headers`
@@ -263,6 +287,11 @@ export interface JwtAuth {
    * left `unknown`. Cookie transport: the state stays `unknown` until `restore()`.
    */
   ready(): Promise<void>;
+  /**
+   * Synchronous check returning `true` once persistent storage reading has settled;
+   * `false` while still in `'unknown'` pre-hydration.
+   */
+  isHydrated(): boolean;
   /**
    * Page-load restore. Cookie transport: the access token lives in memory, so
    * this calls refresh once (the httpOnly cookie authenticates it):

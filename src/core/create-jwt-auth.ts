@@ -28,6 +28,8 @@ export type {
   LoginResult,
   ModeContext,
   ModeRuntime,
+  SessionEndReason,
+  SessionEndedEvent,
   UnauthorizedContext,
 } from './types';
 export type { AuthState } from './state';
@@ -134,6 +136,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
   // Declared after ctx: the closures above only read `runtime` once requests run.
   const runtime: ModeRuntime = o.mode.create(ctx);
 
+  let hydrated = false;
   let readyPromise: Promise<void> | null = null;
   const ready = (): Promise<void> => {
     if (!readyPromise) {
@@ -142,11 +145,15 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
           await runtime.hydrate?.();
         } catch {
           if (state.get().status === 'unknown') state.set(ANONYMOUS_STATE);
+        } finally {
+          hydrated = true;
         }
       })();
     }
     return readyPromise;
   };
+
+  const isHydrated = (): boolean => hydrated;
 
   const acceptTokens = async (rawBody: unknown, response?: Response): Promise<void> => {
     if (!runtime.acceptTokens) throw notConfigured(`acceptTokens for mode '${o.mode.kind}'`, 'core');
@@ -229,6 +236,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
 
     async logout(opts) {
       await ready();
+      const wasAuth = state.get().status === 'authenticated';
       const everywhere = opts?.everywhere === true;
       // Capture without refreshing: a refresh here would rotate tokens we are about to revoke.
       let accessToken: string | null = null;
@@ -242,6 +250,9 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         await clearSession();
       } catch {
         state.set(ANONYMOUS_STATE);
+      }
+      if (wasAuth) {
+        emit({ type: 'session_ended', reason: 'manual_logout' });
       }
       let remoteError: unknown;
       try {
@@ -279,6 +290,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
     },
 
     ready,
+    isHydrated,
 
     async restore() {
       await ready();

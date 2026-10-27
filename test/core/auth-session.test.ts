@@ -480,3 +480,64 @@ describe('userSession', () => {
     expect(mode.kind).toBe('userSession');
   });
 });
+
+describe('isHydrated and session_ended reasons', () => {
+  it('isHydrated() returns false pre-hydration and true once resolved', async () => {
+    let resolveRead: (v: Tokens | null) => void = () => undefined;
+    const store: TokenStore = {
+      get: () => new Promise<Tokens | null>((r) => { resolveRead = r; }),
+      set: () => Promise.resolve(),
+    };
+    const auth = createJwtAuth({
+      baseUrl: 'https://api.test',
+      mode: userSession({ storage: store }),
+    });
+
+    expect(auth.isHydrated()).toBe(false);
+    expect(auth.getState().status).toBe('unknown');
+
+    const readyPromise = auth.ready();
+    expect(auth.isHydrated()).toBe(false);
+
+    resolveRead(null);
+    await readyPromise;
+
+    expect(auth.isHydrated()).toBe(true);
+    expect(auth.getState().status).toBe('anonymous');
+  });
+
+  it('logout() emits session_ended with reason manual_logout', async () => {
+    const { auth, events } = setup(() => json({ token: pair }));
+    await auth.login({ email: 'a@b.c', password: 'p' });
+    await auth.logout();
+    const ended = events.find((e) => e.type === 'session_ended');
+    expect(ended).toEqual({ type: 'session_ended', reason: 'manual_logout' });
+  });
+
+  it('expired token with no refresh token emits session_ended with reason token_expired', async () => {
+    const validAccess = jwt({ sub: '1', exp: now() + 300 });
+    const store = memoryStore();
+    await store.set({ accessToken: validAccess, expiresAt: now() + 300 });
+    const { auth, events } = setup(() => json({}), {}, store);
+    await auth.ready();
+    expect(auth.getState().status).toBe('authenticated');
+
+    // Simulate expiry after hydration
+    await store.set({ accessToken: validAccess, expiresAt: now() - 10 });
+
+    expect(await auth.getAccessToken()).toBeNull();
+    const ended = events.find((e) => e.type === 'session_ended');
+    expect(ended).toEqual({ type: 'session_ended', reason: 'token_expired' });
+  });
+
+  it('refresh 401 rejection emits session_ended with reason refresh_rejected and status 401', async () => {
+    const store = memoryStore();
+    await store.set({ accessToken: access, refreshToken: 'bad_rt', expiresAt: now() - 10 });
+    const { auth, events } = setup(() => json({ message: 'Refresh token revoked' }, 401), {}, store);
+    await auth.ready();
+
+    expect(await auth.handleUnauthorized()).toBe(false);
+    const ended = events.find((e) => e.type === 'session_ended');
+    expect(ended).toEqual({ type: 'session_ended', reason: 'refresh_rejected', status: 401 });
+  });
+});

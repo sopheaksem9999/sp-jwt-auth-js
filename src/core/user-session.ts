@@ -5,7 +5,7 @@ import { bearerFrom } from './http';
 import { createRefresher, isSessionEnded, performTokenRefresh, sessionEndedError, waitFor } from './refresh';
 import { memoryStore } from './stores';
 import type { TokenStore, Tokens } from './stores';
-import type { AuthMode, ModeContext, ModeRuntime } from './types';
+import type { AuthMode, ModeContext, ModeRuntime, SessionEndReason } from './types';
 
 /** Options for `userSession`. */
 export interface UserSessionOptions {
@@ -145,21 +145,27 @@ export function userSession(options: UserSessionOptions = {}): AuthMode {
       };
 
       // Body transport: the shared store is the source of truth, so a message only triggers a re-read.
-      const syncFromStore = async (): Promise<void> => {
+      const syncFromStore = async (reason?: SessionEndReason): Promise<void> => {
         if (ctx.getState().status === 'unknown') return; // hydration will read the store
         const seen = generation;
         const t = await safeGet(store);
         if (seen !== generation) return;
         if (t?.accessToken) ctx.setAuthenticated(t.accessToken);
-        else ctx.setAnonymous();
+        else {
+          const wasAuth = ctx.getState().status === 'authenticated';
+          ctx.setAnonymous();
+          if (wasAuth) {
+            ctx.emit({ type: 'session_ended', reason: reason ?? 'storage_cleared' });
+          }
+        }
       };
       let unsubscribe: (() => void) | null = null;
       let disposed = false;
       // Subscribed on first use, so creating a session opens nothing.
       const listen = (): void => {
         if (disposed || unsubscribe || !crossTab) return;
-        unsubscribe = crossTab.onMessage(() => {
-          void syncFromStore();
+        unsubscribe = crossTab.onMessage((m) => {
+          void syncFromStore(m.type === 'logout' ? 'cross_tab_logout' : undefined);
         });
       };
 
@@ -191,7 +197,7 @@ export function userSession(options: UserSessionOptions = {}): AuthMode {
         if (!t.refreshToken) {
           if (!expired) return access;
           await clearSession();
-          ctx.emit({ type: 'session_ended' });
+          ctx.emit({ type: 'session_ended', reason: 'token_expired' });
           return null;
         }
         if (o?.signal?.aborted) throw o.signal.reason;
