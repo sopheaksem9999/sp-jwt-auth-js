@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createJwtAuth, userSession } from '../../src/core/create-jwt-auth';
 import type { AuthEvent, JwtAuthOptions } from '../../src/core/create-jwt-auth';
 import { memoryStore } from '../../src/core/stores';
-import type { TokenStore } from '../../src/core/stores';
+import type { Tokens, TokenStore } from '../../src/core/stores';
 import { SpAuthError } from '../../src/core/errors';
 
 function b64url(s: string): string {
