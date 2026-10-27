@@ -10,7 +10,8 @@
 
 - `main` holds stable, released code only. Never commit to it directly.
 - Do all implementation on `develop` (or a feature branch merged into `develop`). `develop` is the beta line.
-- Beta release: on `develop`, run `pnpm changeset pre enter beta` once, then `pnpm changeset version`, commit and tag `v<version>-beta.<n>` (for example `v0.2.0-beta.1`). The release workflow publishes it to the `beta` dist-tag, so `npm i <pkg>@beta` gets it and `latest` is untouched.
-- Stable release: when the beta is proven, run `pnpm changeset pre exit` on `develop`, merge `develop` into `main`, run `pnpm changeset version` there, commit and tag `v<version>` on `main`. The workflow publishes to `latest`.
-- The release workflow refuses a stable tag that is not on `main` and a beta tag that is not on `develop`, and a tag that differs from `package.json` `version`.
-- Never force-push or move a tag that was published.
+- Releases are automatic: a push to `main` or `develop` publishes the `package.json` version if no `v<version>` tag exists yet, then creates that tag and a GitHub Release. Release notes are generated from the commits since the previous tag (a summary, the `CHANGELOG.md` section, and commits grouped as features, fixes, docs, tests and other), so write conventional commit subjects (`feat:`, `fix:`, `docs:`).
+- Beta: on `develop`, run `pnpm changeset pre enter beta` once, then `pnpm changeset version`, commit and push. A version with a `-beta.N` suffix releases from `develop` to the `beta` dist-tag (`npm i <pkg>@beta`) and is marked a GitHub pre-release.
+- Stable: when the beta is proven, run `pnpm changeset pre exit` and `pnpm changeset version` on `develop`, merge `develop` into `main` and push. A version without a suffix releases only from `main`, to `latest`.
+- A push whose version already has a tag, or whose version belongs to the other branch, is skipped, so ordinary pushes never publish. Nothing is published unless the version was bumped.
+- Never force-push, and never move or delete a published tag.

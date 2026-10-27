@@ -1,15 +1,19 @@
 name: Release
+# Auto release: a push to main (stable) or develop (beta) publishes `package.json` version when
+# no `v<version>` tag exists yet, then creates that tag and a GitHub Release whose notes come from the
+# commits since the previous tag. Bump the version first (`pnpm changeset version`), commit and merge.
 on:
   push:
-    tags: ['v*']
+    branches: [main, develop]
 
 permissions:
-  contents: read
+  contents: write # create the tag and the GitHub Release
   id-token: write # npm provenance
 
-# Publishing requires `pnpm changeset version` to have been run and COMMITTED on the tagged commit:
-# that bumps package.json `version` and writes CHANGELOG.md. Tag that commit `v<version>`; the guard
-# below refuses to publish when the tag and package.json disagree (e.g. a tag pushed before the bump).
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -17,33 +21,69 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Branch rule (stable from main, beta from develop)
+      - name: Decide
+        id: v
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          if [[ "$v" == *-* ]]; then branch=develop; else branch=main; fi
-          git fetch origin "$branch"
-          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch" || { echo "::error::$GITHUB_REF_NAME must be tagged on a commit reachable from $branch"; exit 1; }
+          version=$(node -p "require('./package.json').version")
+          name=$(node -p "require('./package.json').name")
+          if [[ "$version" == *-* ]]; then channel=beta; want=develop; else channel=latest; want=main; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::notice::$version is a $channel version; it releases from $want, not $GITHUB_REF_NAME. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "::notice::v$version already released. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: pnpm/action-setup@v4
+        if: steps.v.outputs.skip == 'false'
       - uses: actions/setup-node@v4
+        if: steps.v.outputs.skip == 'false'
         with:
           node-version: 24
           cache: pnpm
           registry-url: https://registry.npmjs.org
-      - name: Tag matches package.json version
-        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm lint
-      - run: pnpm typecheck
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm install --frozen-lockfile
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm lint
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm typecheck
       # Build first so the dist-based tests run instead of skipping.
-      - run: pnpm build
-      - run: pnpm vitest run
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm build
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm vitest run
         env:
           REQUIRE_DIST: '1'
-      - run: pnpm check
-      - name: Publish (stable -> latest, prerelease -> beta)
+      - if: steps.v.outputs.skip == 'false'
+        run: pnpm check
+      - name: Publish to npm (skipped when this version is already on the registry)
+        if: steps.v.outputs.skip == 'false'
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          if [[ "$v" == *-* ]]; then tag=beta; else tag=latest; fi
-          npm publish --provenance --access public --tag "$tag"
+          if npm view "${{ steps.v.outputs.name }}@${{ steps.v.outputs.version }}" version >/dev/null 2>&1; then
+            echo "::notice::already on npm"
+          else
+            npm publish --provenance --access public --tag "${{ steps.v.outputs.channel }}"
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Tag and GitHub Release
+        if: steps.v.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="v${{ steps.v.outputs.version }}"
+          if [ "${{ steps.v.outputs.channel }}" = latest ]; then
+            prev=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' 2>/dev/null || true)
+          else
+            prev=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          fi
+          node scripts/release-notes.mjs "${{ steps.v.outputs.version }}" "$prev" > "$RUNNER_TEMP/notes.md"
+          flags=()
+          [ "${{ steps.v.outputs.channel }}" = beta ] && flags+=(--prerelease)
+          gh release create "$v" --target "$GITHUB_SHA" --title "$v" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
