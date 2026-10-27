@@ -1,4 +1,4 @@
-# `@sopheak/sp-jwt-auth/oauth`
+# `@sokpheak/sp-jwt-auth/oauth`
 
 Client for the backend's `oauth_server` module (config flag `sp-jwt-auth.oauth_server.*`, **off by default**: the routes answer 404, which this module reports as `SpAuthError('module_disabled')`, module `oauth`). Mirrors `routes/oauth.php` (`/token` :12, `/revoke` :14, `/introspect` :16, under the `oauth_server.route_prefix`) and `OAuthServerService.php` (`validateAuthorizationRequest` :45-82, `revokeToken` :165, `introspect` :184, `issueAuthorizationCodeToken` :244, client credentials :321-336, `validPkce` :413).
 
@@ -7,8 +7,8 @@ Client for the backend's `oauth_server` module (config flag `sp-jwt-auth.oauth_s
 For an app that logs users in through your Laravel app's `oauth_server`. The host must serve the authorize page (`/oauth/authorize`: the package gives you `validateAuthorizationRequest` / `approveAuthorizationRequest`, not a route); this mode talks to `/oauth/token`.
 
 ```ts
-import { createJwtAuth, webStorageStore } from '@sopheak/sp-jwt-auth';
-import { oauthAuthorizationCode } from '@sopheak/sp-jwt-auth/oauth';
+import { createJwtAuth, webStorageStore } from '@sokpheak/sp-jwt-auth';
+import { oauthAuthorizationCode } from '@sokpheak/sp-jwt-auth/oauth';
 
 const oauthMode = oauthAuthorizationCode({
   clientId: 'my-spa',
@@ -69,7 +69,7 @@ The backend defaults an omitted `code_challenge_method` to **`plain`** when a ch
 ## Introspection and revocation (`oauth(auth, creds)`)
 
 ```ts
-import { oauth } from '@sopheak/sp-jwt-auth/oauth';
+import { oauth } from '@sokpheak/sp-jwt-auth/oauth';
 
 const tokens = oauth(auth, { clientId, clientSecret });           // auth?: 'basic' (default) | 'body'
 const info = await tokens.introspect(accessToken);                // { active: false } | { active: true, clientId, userId, scopes, expiresAt, tokenId }

@@ -19,7 +19,7 @@ const b64url = (s: string): string => btoa(s).replace(/\+/g, '-').replace(/\//g,
 const jwt = (exp: number): string => `${b64url('{"alg":"none"}')}.${b64url(JSON.stringify({ sub: '7', exp }))}.sig`;
 const now = (): number => Math.floor(Date.now() / 1000);
 
-console.log(`deno-smoke: @sopheak/sp-jwt-auth on ${name}`);
+console.log(`deno-smoke: @sokpheak/sp-jwt-auth on ${name}`);
 const seen: string[] = [];
 const near = jwt(now() + 30);
 const fresh = jwt(now() + 900);

@@ -1,13 +1,13 @@
-# @sopheak/sp-jwt-auth
+# @sokpheak/sp-jwt-auth
 
-Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (`@sopheak/sp-jwt-auth/verify`). CI runs the test suite on Node 22 and 24, on Deno and Bun, and under `@edge-runtime/vm`; on Node 20 it runs only the dist and bundle checks and the CJS/ESM smoke imports of the built package (the `pnpm check` guards; the build itself runs on Node 24), because the test runner (Vitest 5) needs Node 22.12 or later. The package itself supports Node 20+. The edge run proves the code works with the edge web globals, but it cannot block Node globals (vitest leaves `process` and `Buffer` visible there), so an AST scan of `src/` and the dist and browser-bundle checks are what keep Node-only code out.
+Typed JavaScript client for the [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth) Laravel package: token storage, refresh and session helpers. ESM and CJS, no runtime dependencies, runs in browsers, edge runtimes and Node 20+. `jose` is an optional peer dependency, needed only by the `verify` module (`@sokpheak/sp-jwt-auth/verify`). CI runs the test suite on Node 22 and 24, on Deno and Bun, and under `@edge-runtime/vm`; on Node 20 it runs only the dist and bundle checks and the CJS/ESM smoke imports of the built package (the `pnpm check` guards; the build itself runs on Node 24), because the test runner (Vitest 5) needs Node 22.12 or later. The package itself supports Node 20+. The edge run proves the code works with the edge web globals, but it cannot block Node globals (vitest leaves `process` and `Buffer` visible there), so an AST scan of `src/` and the dist and browser-bundle checks are what keep Node-only code out.
 
 > Status: **0.1, first release.** It ships the core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport, cross-tab refresh), the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`), the presets, and every [module](#modules): `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social`. Caveats: the contract tests against the real backends are written but not yet run (see [Backend compatibility](#backend-compatibility)), and the cookie transport has been verified end to end against a fake backend only.
 
 ## Install
 
 ```sh
-npm install @sopheak/sp-jwt-auth
+npm install @sokpheak/sp-jwt-auth
 ```
 
 ## Quick start
@@ -16,7 +16,7 @@ Browser or single-user app: tokens persisted in `localStorage`, refreshed for yo
 
 <!-- snippet:quickstart -->
 ```ts
-// import { createJwtAuth, presets, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+// import { createJwtAuth, presets, userSession, webStorageStore } from '@sokpheak/sp-jwt-auth';
 
 const auth = createJwtAuth({
   baseUrl: 'https://api.example.com', // origin + the host's prefix (e.g. '/api/v2')
@@ -39,7 +39,7 @@ console.log(await auth.getHeaders()); // {}
 auth.dispose?.(); // when the client is discarded (an app unmount, a test)
 ```
 
-`getHeaders()` and `handleUnauthorized()` are the `ApiAuth` contract that `@sopheak/sp-laravel-api` expects, so the client can be passed as its `auth` option without any adapter.
+`getHeaders()` and `handleUnauthorized()` are the `ApiAuth` contract that `@sokpheak/sp-laravel-api` expects, so the client can be passed as its `auth` option without any adapter.
 
 `login()` resolves `{ status: 'authenticated' }` or `{ status: 'second_factor_required', challenge }`. Any failure rejects with an [`SpAuthError`](#error-codes).
 
@@ -100,7 +100,7 @@ With the default body transport the 60-day refresh token sits in `localStorage`,
 
 <!-- snippet:cookie -->
 ```ts
-// import { createJwtAuth, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+// import { createJwtAuth, userSession, webStorageStore } from '@sokpheak/sp-jwt-auth';
 
 const auth = createJwtAuth({
   baseUrl: 'https://api.example.com',
@@ -146,7 +146,7 @@ Never share an auth client, its store, or a mode object holding a store, between
 
 <!-- snippet:perrequest -->
 ```ts
-// import { createJwtAuth, memoryStore, presets, userSession } from '@sopheak/sp-jwt-auth';
+// import { createJwtAuth, memoryStore, presets, userSession } from '@sokpheak/sp-jwt-auth';
 
 async function authForRequest(accessToken: string | undefined) {
   const storage = memoryStore(); // never shared between requests or users
@@ -182,7 +182,7 @@ For Node, Express, NestJS and the server side of meta-frameworks. They touch no 
 
 <!-- snippet:statictoken -->
 ```ts
-// import { createJwtAuth, presets, staticToken } from '@sopheak/sp-jwt-auth';
+// import { createJwtAuth, presets, staticToken } from '@sokpheak/sp-jwt-auth';
 
 function authForIncomingRequest(req: { headers: Record<string, string | undefined> }) {
   return createJwtAuth({
@@ -278,7 +278,7 @@ Routes you do not configure make the feature that needs them reject with `SpAuth
 Accept the same access tokens Laravel issued in an Express middleware, a NestJS guard or any Node API. Needs the optional peer `jose` (`npm i jose`); it is imported only from this subpath.
 
 ```ts
-import { createVerifier } from '@sopheak/sp-jwt-auth/verify';
+import { createVerifier } from '@sokpheak/sp-jwt-auth/verify';
 
 const verify = createVerifier({ jwksUrl: process.env.SP_JWKS_URL!, issuer: process.env.SP_ISSUER! });
 
@@ -328,22 +328,22 @@ Each module is a function that takes the core auth object (or, for `oauth`, a mo
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
-| Core: `JwtTokenService`, guard, `TokenContext`; `token_endpoints`; host login / 2FA | `@sopheak/sp-jwt-auth` | `createJwtAuth`, `userSession`, state/subscribe, `memoryStore` / `webStorageStore`, refresh rules, `getHeaders`, `handleUnauthorized`, scope checks, claims, single flight, cross-tab lock, `login`, `verifySecondFactor`, `logout`, `whoami`, `switchCompany`, `presets`, cookie transport (`transport: 'cookie'`, `restore()`, `readCookie`) | **0.1** |
-| `api_keys` | `@sopheak/sp-jwt-auth` (core) | `apiKey()` mode | **0.1** |
-| (server tokens) | `@sopheak/sp-jwt-auth` (core) | `staticToken()` mode | **0.1** |
-| `first_factor_otp` | `@sopheak/sp-jwt-auth/otp` | `otp(auth)` | **0.1** |
-| `mfa` | `@sopheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | **0.1** |
-| Sessions (`activeSessionsForUser`, `revokeSession`, `revokeAllForUser`, `revokeDevice`) | `@sopheak/sp-jwt-auth/sessions` | `sessions(auth)`: `list`, `revoke`, `revokeOthers`, `revokeDevice` | **0.1** |
-| `oauth_server` | `@sopheak/sp-jwt-auth` (core) | `clientCredentials()` mode | **0.1** |
-| `oauth_server` | `@sopheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode (PKCE S256), `introspect`, `revoke` | **0.1** |
-| `external_identities` | `@sopheak/sp-jwt-auth/social` | `social(auth)`: `redirectUrl`, `completeFromCallback` | **0.1** |
-| `password_reset`, `email_verification` | `@sopheak/sp-jwt-auth/account` | `account(auth)`: `forgotPassword`, `resetPassword`, `resendVerification`, `verifyEmail` | **0.1** |
-| `keys` / JWKS | `@sopheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
+| Core: `JwtTokenService`, guard, `TokenContext`; `token_endpoints`; host login / 2FA | `@sokpheak/sp-jwt-auth` | `createJwtAuth`, `userSession`, state/subscribe, `memoryStore` / `webStorageStore`, refresh rules, `getHeaders`, `handleUnauthorized`, scope checks, claims, single flight, cross-tab lock, `login`, `verifySecondFactor`, `logout`, `whoami`, `switchCompany`, `presets`, cookie transport (`transport: 'cookie'`, `restore()`, `readCookie`) | **0.1** |
+| `api_keys` | `@sokpheak/sp-jwt-auth` (core) | `apiKey()` mode | **0.1** |
+| (server tokens) | `@sokpheak/sp-jwt-auth` (core) | `staticToken()` mode | **0.1** |
+| `first_factor_otp` | `@sokpheak/sp-jwt-auth/otp` | `otp(auth)` | **0.1** |
+| `mfa` | `@sokpheak/sp-jwt-auth/mfa` | `mfa(auth).resend(challenge)` | **0.1** |
+| Sessions (`activeSessionsForUser`, `revokeSession`, `revokeAllForUser`, `revokeDevice`) | `@sokpheak/sp-jwt-auth/sessions` | `sessions(auth)`: `list`, `revoke`, `revokeOthers`, `revokeDevice` | **0.1** |
+| `oauth_server` | `@sokpheak/sp-jwt-auth` (core) | `clientCredentials()` mode | **0.1** |
+| `oauth_server` | `@sokpheak/sp-jwt-auth/oauth` | `oauthAuthorizationCode` mode (PKCE S256), `introspect`, `revoke` | **0.1** |
+| `external_identities` | `@sokpheak/sp-jwt-auth/social` | `social(auth)`: `redirectUrl`, `completeFromCallback` | **0.1** |
+| `password_reset`, `email_verification` | `@sokpheak/sp-jwt-auth/account` | `account(auth)`: `forgotPassword`, `resetPassword`, `resendVerification`, `verifyEmail` | **0.1** |
+| `keys` / JWKS | `@sokpheak/sp-jwt-auth/verify` | `createVerifier` (optional peer `jose`) | **0.1** |
 
 ### First-factor OTP (`otp`)
 
 ```ts
-import { otp } from '@sopheak/sp-jwt-auth/otp';
+import { otp } from '@sokpheak/sp-jwt-auth/otp';
 
 const codes = otp(auth);
 const sent = await codes.request({ destination: 'a@example.com', channel: 'email', purpose: 'login' }); // 202
@@ -355,7 +355,7 @@ Needs the backend's `first_factor_otp` module (off by default; a 404 is `module_
 ### MFA resend (`mfa`)
 
 ```ts
-import { mfa } from '@sopheak/sp-jwt-auth/mfa';
+import { mfa } from '@sokpheak/sp-jwt-auth/mfa';
 
 const result = await auth.login(credentials);
 if (result.status === 'second_factor_required') {
@@ -371,7 +371,7 @@ if (result.status === 'second_factor_required') {
 Authorization code with PKCE, for an app that logs users in through the host's `oauth_server` module (off by default on the backend; a 404 is `module_disabled`):
 
 ```ts
-import { oauth, oauthAuthorizationCode } from '@sopheak/sp-jwt-auth/oauth';
+import { oauth, oauthAuthorizationCode } from '@sokpheak/sp-jwt-auth/oauth';
 
 const oauthMode = oauthAuthorizationCode({ clientId: 'my-spa', redirectUri, scope: 'read', authorizeUrl: 'https://api.example.com/oauth/authorize' });
 const auth = createJwtAuth({ baseUrl: 'https://api.example.com/api', mode: oauthMode });
@@ -394,7 +394,7 @@ Details: [`src/oauth/README.md`](https://github.com/sopheaksem9999/sp-jwt-auth-j
 ### Sessions (`sessions`)
 
 ```ts
-import { sessions } from '@sopheak/sp-jwt-auth/sessions';
+import { sessions } from '@sokpheak/sp-jwt-auth/sessions';
 
 const s = sessions(auth); // options: { method?: 'DELETE' | 'POST', revokeOthersBody?: (sid) => body }
 const list = await s.list();            // GET endpoints.sessions; the entry whose id equals the JWT `sid` has current: true
@@ -408,7 +408,7 @@ The package has no session routes: they are host routes you configure under `end
 ### Account (`account`)
 
 ```ts
-import { account } from '@sopheak/sp-jwt-auth/account';
+import { account } from '@sokpheak/sp-jwt-auth/account';
 
 await account(auth).forgotPassword({ email });
 await account(auth).resetPassword({ token, email, password, password_confirmation }); // success clears the local session
@@ -421,7 +421,7 @@ Host routes (`endpoints.forgotPassword`, `resetPassword`, `resendVerification`, 
 ### Social login (`social`)
 
 ```ts
-import { social } from '@sopheak/sp-jwt-auth/social';
+import { social } from '@sokpheak/sp-jwt-auth/social';
 
 location.href = social(auth).redirectUrl('google'); // baseUrl + endpoints.socialRedirect, ':provider' replaced
 // on the callback page:
@@ -432,7 +432,7 @@ Host routes. There is no OIDC support: the package has no ID tokens, userinfo or
 
 ## Backend compatibility
 
-| `@sopheak/sp-jwt-auth` | `sopheak/sp-jwt-auth` (Laravel) |
+| `@sokpheak/sp-jwt-auth` | `sopheak/sp-jwt-auth` (Laravel) |
 |---|---|
 | `0.1` | `^0.1.25` |
 

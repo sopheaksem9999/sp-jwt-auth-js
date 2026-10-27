@@ -1,13 +1,13 @@
 # verify
 
-Verifies Laravel-issued access tokens in Node (Express, NestJS, any API) against the backend's JWKS. Import path: `@sopheak/sp-jwt-auth/verify`.
+Verifies Laravel-issued access tokens in Node (Express, NestJS, any API) against the backend's JWKS. Import path: `@sokpheak/sp-jwt-auth/verify`.
 
 - **Backend module:** `keys` (JWKS). Route `GET /.well-known/sp-jwt-auth/jwks.json`, on by default; switch off with config `keys.jwks_enabled` (env `SP_JWT_JWKS_ENABLED`).
 - **Mirrors:** `src/Signing/JwksFormatter.php:34-45` in `sopheak/sp-jwt-auth` (RSA keys only, each published as `{kty:"RSA",use:"sig",kid,alg,n,e}`; the `RuntimeException` for a non-RSA key is at `:34-36`).
 - **Peer dependency:** `jose ^6` (optional). It is imported only from this subpath, so apps that never verify tokens never load it. `dist/index.*` contains no `jose` reference (checked by `scripts/check-dist.mjs`).
 
 ```ts
-import { createVerifier } from '@sopheak/sp-jwt-auth/verify';
+import { createVerifier } from '@sokpheak/sp-jwt-auth/verify';
 
 const verify = createVerifier({ jwksUrl, issuer, audience /* optional */, algorithms: ['RS256'] /* default */ });
 const claims = await verify(token); // { sub: string, scopes: string[], exp, sid?, company_id?, ... }

@@ -1,9 +1,9 @@
-# `@sopheak/sp-jwt-auth/account`
+# `@sokpheak/sp-jwt-auth/account`
 
 Client for password reset and e-mail verification. Backend: the `PasswordResetBroker` and `EmailVerificationBroker` services (config flags `password_reset.enabled` / `email_verification.enabled`, `config/sp-jwt-auth.php:131-141`). The package ships brokers only, **no routes**: they are **host-owned** and configured through `endpoints.forgotPassword`, `resetPassword`, `resendVerification`, `verifyEmail` (SaaS: `/auth/forgot-password`, `/auth/reset-password`, `/auth/resend-email-verification`). An unset one throws `SpAuthError('not_configured', module 'account')` with no request.
 
 ```ts
-import { account } from '@sopheak/sp-jwt-auth/account';
+import { account } from '@sokpheak/sp-jwt-auth/account';
 
 const a = account(auth);
 await a.forgotPassword({ email });

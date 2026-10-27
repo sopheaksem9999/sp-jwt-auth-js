@@ -1,9 +1,9 @@
-# `@sopheak/sp-jwt-auth/sessions`
+# `@sokpheak/sp-jwt-auth/sessions`
 
 Client for session and device revocation. Backend: `JwtTokenService::activeSessionsForUser`, `revokeSession`, `revokeAllForUser`, `revokeDevice` (`src/Services/JwtTokenService.php:252-335`), part of the core token service (no config flag). The package ships **no routes**: they are **host-owned** and configured through `endpoints`. An unset endpoint throws `SpAuthError('not_configured', module 'sessions')` with no request made.
 
 ```ts
-import { sessions } from '@sopheak/sp-jwt-auth/sessions';
+import { sessions } from '@sokpheak/sp-jwt-auth/sessions';
 
 const s = sessions(auth);
 const list = await s.list();

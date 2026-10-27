@@ -54,7 +54,7 @@ afterEach(() => {
 
 async function quickStart(): Promise<void> {
   // #region snippet:quickstart
-  // import { createJwtAuth, presets, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+  // import { createJwtAuth, presets, userSession, webStorageStore } from '@sokpheak/sp-jwt-auth';
 
   const auth = createJwtAuth({
     baseUrl: 'https://api.example.com', // origin + the host's prefix (e.g. '/api/v2')
@@ -203,7 +203,7 @@ describe('README servers: one instance per request', () => {
   it('seeds a private memoryStore, sends the token, and shares nothing between requests', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     // #region snippet:perrequest
-    // import { createJwtAuth, memoryStore, presets, userSession } from '@sopheak/sp-jwt-auth';
+    // import { createJwtAuth, memoryStore, presets, userSession } from '@sokpheak/sp-jwt-auth';
 
     async function authForRequest(accessToken: string | undefined) {
       const storage = memoryStore(); // never shared between requests or users
@@ -232,7 +232,7 @@ describe('README server modes: staticToken per request', () => {
   it('reads the token on every call and sends it to the host', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     // #region snippet:statictoken
-    // import { createJwtAuth, presets, staticToken } from '@sopheak/sp-jwt-auth';
+    // import { createJwtAuth, presets, staticToken } from '@sokpheak/sp-jwt-auth';
 
     function authForIncomingRequest(req: { headers: Record<string, string | undefined> }) {
       return createJwtAuth({
@@ -279,7 +279,7 @@ describe('README cookie transport', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     // #region snippet:cookie
-    // import { createJwtAuth, userSession, webStorageStore } from '@sopheak/sp-jwt-auth';
+    // import { createJwtAuth, userSession, webStorageStore } from '@sokpheak/sp-jwt-auth';
 
     const auth = createJwtAuth({
       baseUrl: 'https://api.example.com',

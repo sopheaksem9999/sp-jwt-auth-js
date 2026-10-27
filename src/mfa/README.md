@@ -1,9 +1,9 @@
-# `@sopheak/sp-jwt-auth/mfa`
+# `@sokpheak/sp-jwt-auth/mfa`
 
 Client for the backend's `mfa` OTP challenge brokers (`MfaChallengeBroker`, `OtpChallengeBroker`). The package ships brokers only, **no routes**: the resend route is host code, so you set `endpoints.secondFactorResend`. (The SaaS host answers this in its own 2FA controller; there is no package file:line to mirror. The request bodies follow the second-factor step, `docs/tutorials/login-with-mfa.md:46-70`.)
 
 ```ts
-import { mfa } from '@sopheak/sp-jwt-auth/mfa';
+import { mfa } from '@sokpheak/sp-jwt-auth/mfa';
 
 const result = await auth.login(credentials);
 if (result.status === 'second_factor_required') {

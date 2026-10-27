@@ -1,9 +1,9 @@
-# `@sopheak/sp-jwt-auth/otp`
+# `@sokpheak/sp-jwt-auth/otp`
 
 Client for the backend's `first_factor_otp` module (config flag `sp-jwt-auth.first_factor_otp.enabled`, **off by default**). Mirrors `routes/otp.php` of `sopheak/sp-jwt-auth` (`request` :12-40, `resend` :42-66, `resend-by-destination` :68-88, `verify` :90-131).
 
 ```ts
-import { otp } from '@sopheak/sp-jwt-auth/otp';
+import { otp } from '@sokpheak/sp-jwt-auth/otp';
 
 const codes = otp(auth);
 const sent = await codes.request({ destination: 'a@example.com', channel: 'email', purpose: 'login' });

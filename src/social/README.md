@@ -1,9 +1,9 @@
-# `@sopheak/sp-jwt-auth/social`
+# `@sokpheak/sp-jwt-auth/social`
 
 Client for social login. Backend: `external_identities` (config flag `external_identities.enabled`, `config/sp-jwt-auth.php:153-158`; the `ExternalIdentityProvider` contract and `ExternalIdentityStore`, `src/Services/ExternalIdentityStore.php:14`). The package ships **no routes** (hosts use Socialite): they are **host-owned** and configured through `endpoints.socialRedirect` and `endpoints.socialCallback`, each with a `:provider` placeholder. An unset one, or one without the `:provider` placeholder, throws `SpAuthError('not_configured', module 'social')` before any request.
 
 ```ts
-import { social } from '@sopheak/sp-jwt-auth/social';
+import { social } from '@sokpheak/sp-jwt-auth/social';
 
 location.href = social(auth).redirectUrl('google');
 // on the callback page

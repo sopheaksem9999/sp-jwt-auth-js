@@ -1,4 +1,4 @@
-// Spec §10: "Neither package imports the other. @sopheak/sp-jwt-auth installs and works without @sopheak/sp-laravel-api."
+// Spec §10: "Neither package imports the other. @sokpheak/sp-jwt-auth installs and works without @sokpheak/sp-laravel-api."
 // Node-only (reads files, spawns node), so the edge project excludes *.node.test.ts.
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
-const SELF = '@sopheak/sp-jwt-auth';
-const OTHER = '@sopheak/sp-laravel-api';
+const SELF = '@sokpheak/sp-jwt-auth';
+const OTHER = '@sokpheak/sp-laravel-api';
 const IMPORT_OF_OTHER = new RegExp(`(?:\\bfrom|\\bimport|\\brequire)\\s*\\(?\\s*["'\`]${OTHER.replace('/', '\\/')}(?:["'\`/])`);
 
 function files(dir: string, keep: (f: string) => boolean): string[] {

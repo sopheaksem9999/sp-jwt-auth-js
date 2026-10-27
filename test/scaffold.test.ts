@@ -9,7 +9,7 @@ describe('scaffold', () => {
   });
 
   it('package.json carries the binding constraints', () => {
-    expect(pkg.name).toBe('@sopheak/sp-jwt-auth');
+    expect(pkg.name).toBe('@sokpheak/sp-jwt-auth');
     expect(pkg.engines.node).toBe('>=20');
     expect(pkg.sideEffects).toBe(false);
     expect(pkg.license).toBe('MIT');

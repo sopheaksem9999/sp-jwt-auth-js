@@ -1,4 +1,4 @@
-# @sopheak/sp-jwt-auth
+# @sokpheak/sp-jwt-auth
 
 ## 0.1.0
 
@@ -6,7 +6,7 @@
 
 - 30f3fbc: First release (0.1) of the typed JavaScript client for the `sopheak/sp-jwt-auth` Laravel package (backend `^0.1.25`). ESM and CJS, no runtime dependencies; browsers, edge runtimes, Node 20+, Deno and Bun.
   
-  - **Core session**: `createJwtAuth({ baseUrl, endpoints?, mode, unwrap?, ... })` with `login` / `verifySecondFactor` (a `LoginResult` of `authenticated` or `second_factor_required`), `logout` (local first, best-effort revoke), `whoami`, `switchCompany`, `getAccessToken` / `getHeaders` with proactive refresh, single-flight refresh, retry-once `handleUnauthorized` (the `ApiAuth` contract of `@sopheak/sp-laravel-api`), framework-agnostic `getState` / `subscribe`, claims and scope helpers, and one `SpAuthError` type with documented codes.
+  - **Core session**: `createJwtAuth({ baseUrl, endpoints?, mode, unwrap?, ... })` with `login` / `verifySecondFactor` (a `LoginResult` of `authenticated` or `second_factor_required`), `logout` (local first, best-effort revoke), `whoami`, `switchCompany`, `getAccessToken` / `getHeaders` with proactive refresh, single-flight refresh, retry-once `handleUnauthorized` (the `ApiAuth` contract of `@sokpheak/sp-laravel-api`), framework-agnostic `getState` / `subscribe`, claims and scope helpers, and one `SpAuthError` type with documented codes.
   - **`userSession`**: body transport (`memoryStore`, `webStorageStore`; the default store is a fresh `memoryStore()` per client) and the httpOnly-cookie transport (`transport: 'cookie'`: refresh token never visible to JavaScript, access token in memory, CSRF double-submit, `restore()` on page load, `readCookie`).
   - **Cross-tab refresh**: Web Locks with an in-process fallback, `BroadcastChannel` with a `storage`-event fallback, adoption of another tab's rotation, `broadcastGraceMs` for the cookie transport. On by default for a `webStorageStore` and, in a real browser tab, for the cookie transport with any store; servers (including Node-like runtimes with a global `document`, such as jsdom) stay store-scoped (no process-wide lock or channel).
   - **Server modes**: `staticToken`, `clientCredentials` (OAuth client credentials, cached and re-fetched before expiry) and `apiKey`.
