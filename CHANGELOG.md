@@ -10,7 +10,7 @@
   - **`userSession`**: body transport (`memoryStore`, `webStorageStore`; the default store is a fresh `memoryStore()` per client) and the httpOnly-cookie transport (`transport: 'cookie'`: refresh token never visible to JavaScript, access token in memory, CSRF double-submit, `restore()` on page load, `readCookie`).
   - **Cross-tab refresh**: Web Locks with an in-process fallback, `BroadcastChannel` with a `storage`-event fallback, adoption of another tab's rotation, `broadcastGraceMs` for the cookie transport. On by default for a `webStorageStore` and, in a real browser tab, for the cookie transport with any store; servers (including Node-like runtimes with a global `document`, such as jsdom) stay store-scoped (no process-wide lock or channel).
   - **Server modes**: `staticToken`, `clientCredentials` (OAuth client credentials, cached and re-fetched before expiry) and `apiKey`.
-  - **Presets**: `presets.spJwtTest` and `presets.speedxSaas`.
+  - **Presets**: `presets.spJwtTest` and `presets.spSaas`.
   - **Subpath modules**: `/verify` (`createVerifier`, JWKS verification with the optional peer `jose`), `/otp` (first-factor OTP), `/mfa` (second-factor resend), `/oauth` (`oauthAuthorizationCode` with PKCE S256 and state-keyed pending logins, `oauth(auth, creds)` introspect / revoke for servers, `pkceChallenge`), `/sessions` (list and revoke sessions and devices), `/account` (password reset, e-mail verification) and `/social` (redirect URL and callback completion).
   - **Hardening**: errors, events and causes are sanitised in the package code (no response bodies or token values; the `logout` event's `remoteError` is `{ status, code }` only). Recorded contract fixtures will need the scrub helper: review them before committing fixtures.
   

@@ -52,6 +52,8 @@ jobs:
           REQUIRE_DIST: '1'
       - run: pnpm test:edge-canary
       - run: pnpm check
+        env:
+          FORBIDDEN_NAMES: ${{ secrets.FORBIDDEN_NAMES }}
 
   # Node 20 (still a supported runtime, `engines.node >=20`): no test suite here, because Vitest 5 needs
   # Node >= 22.12, and pnpm 12 itself needs Node >= 22.13. So `pnpm check` (build, publint, attw and the guards)
@@ -69,6 +71,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+        env:
+          FORBIDDEN_NAMES: ${{ secrets.FORBIDDEN_NAMES }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20

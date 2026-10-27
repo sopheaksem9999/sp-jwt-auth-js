@@ -61,7 +61,7 @@ describe('presets', () => {
       endpoints: { login: '/auth/login', refresh: '/auth/refresh', logout: '/auth/logout', whoami: '/me' },
       unwrap: 'raw',
     });
-    expect(presets.speedxSaas).toEqual({
+    expect(presets.spSaas).toEqual({
       endpoints: {
         login: '/auth/login',
         secondFactor: '/auth/login/2fa',
@@ -81,13 +81,13 @@ describe('presets', () => {
     const before = JSON.stringify(presets);
     expect(Object.isFrozen(presets)).toBe(true);
     expect(Object.isFrozen(presets.spJwtTest)).toBe(true);
-    expect(Object.isFrozen(presets.speedxSaas.endpoints)).toBe(true);
+    expect(Object.isFrozen(presets.spSaas.endpoints)).toBe(true);
     const auth = createJwtAuth({ baseUrl: BASE, ...presets.spJwtTest, mode: userSession({ storage: memoryStore() }) });
     auth.dispose?.();
     expect(JSON.stringify(presets)).toBe(before);
     expect(api.presets).toBe(presets);
     expect('baseUrl' in presets.spJwtTest).toBe(false);
-    expect('mode' in presets.speedxSaas).toBe(false);
+    expect('mode' in presets.spSaas).toBe(false);
   });
 
   it('spJwtTest logs in against the {user, token} shape', async () => {
@@ -104,13 +104,13 @@ describe('presets', () => {
     auth.dispose?.();
   });
 
-  it('speedxSaas logs in against the envelope and handles the un-enveloped 2FA step', async () => {
+  it('spSaas logs in against the envelope and handles the un-enveloped 2FA step', async () => {
     const at = access({ company_id: 7 });
     const { fetch, calls } = recorder((c) => {
       if (c.url.endsWith('/auth/login')) return json({ requires_2fa: true, '2fa_token': 'T' });
       return json({ success: true, data: { token_type: 'Bearer', expires_in: 900, access_token: at, refresh_token: 'r0', company_id: 7 } });
     });
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: memoryStore() }), fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: memoryStore() }), fetch });
     const res = await auth.login({ email: 'a', password: 'b' });
     expect(res).toEqual({ status: 'second_factor_required', challenge: { kind: '2fa_token', token: 'T' } });
     expect(auth.getState().status).toBe('anonymous');
@@ -139,7 +139,7 @@ describe('whoami', () => {
     const store = memoryStore();
     await store.set({ accessToken: at, refreshToken: 'r0', expiresAt: nowSec() + 900 });
     const { fetch, calls } = recorder(() => json({ success: true, data: { id: 9, name: 'Ann' } }));
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: store }), fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: store }), fetch });
     await auth.ready();
     let notified = 0;
     auth.subscribe(() => notified++);
@@ -165,7 +165,7 @@ describe('whoami', () => {
       }
       return c.headers.Authorization === `Bearer ${fresh}` ? json({ success: true, data: { id: 1 } }) : json({ message: 'no' }, 401);
     });
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: store }), fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: store }), fetch });
     expect(await auth.whoami()).toEqual({ id: 1 });
     expect(calls.map((c) => c.url.replace(BASE, ''))).toEqual(['/auth/whoami', '/auth/refresh', '/auth/whoami']);
     auth.dispose?.();
@@ -229,7 +229,7 @@ describe('switchCompany', () => {
     });
     const auth = createJwtAuth({
       baseUrl: BASE,
-      ...presets.speedxSaas,
+      ...presets.spSaas,
       mode: userSession({ storage: store }),
       fetch: calls.fetch,
       device: { name: 'Test' },
@@ -261,7 +261,7 @@ describe('switchCompany', () => {
     const { store } = await loggedIn();
     const before = await store.get();
     const { fetch } = recorder(() => json({ success: true, data: { ok: true } }));
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: store }), fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: store }), fetch });
     await expect(auth.switchCompany(2)).rejects.toMatchObject({ code: 'unknown' });
     expect(await store.get()).toEqual(before);
     expect(auth.getState().companyId).toBe('1');
@@ -271,7 +271,7 @@ describe('switchCompany', () => {
   it('two simultaneous switchCompany calls never present the same refresh token', async () => {
     const { store } = await loggedIn();
     const host = saasHost();
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: store }), fetch: host.fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: store }), fetch: host.fetch });
     await Promise.all([auth.switchCompany(2), auth.switchCompany(3)]);
     expect(host.presented).toEqual(['r0', 'r1']);
     expect(host.reused).toEqual([]);
@@ -286,7 +286,7 @@ describe('switchCompany', () => {
   ])('a concurrent switchCompany and refresh rotate strictly (%s)', async (_n, switchFirst) => {
     const { store } = await loggedIn();
     const host = saasHost();
-    const auth = createJwtAuth({ baseUrl: BASE, ...presets.speedxSaas, mode: userSession({ storage: store }), fetch: host.fetch });
+    const auth = createJwtAuth({ baseUrl: BASE, ...presets.spSaas, mode: userSession({ storage: store }), fetch: host.fetch });
     const ps = switchFirst
       ? [auth.switchCompany(4), auth.refresh()]
       : [auth.refresh(), auth.switchCompany(4)];
@@ -302,7 +302,7 @@ describe('switchCompany', () => {
     const host = saasHost();
     const auth = createJwtAuth({
       baseUrl: BASE,
-      ...presets.speedxSaas,
+      ...presets.spSaas,
       mode: userSession({ storage: store, crossTab: false }),
       fetch: host.fetch,
     });

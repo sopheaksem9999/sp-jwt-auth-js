@@ -361,7 +361,7 @@ describe('README stays in sync with this file', () => {
   });
 
   it('presets documented in the README exist', () => {
-    for (const name of ['spJwtTest', 'speedxSaas']) expect(readme).toContain(`presets.${name}`);
-    expect(Object.keys(presets).sort()).toEqual(['spJwtTest', 'speedxSaas'].sort());
+    for (const name of ['spJwtTest', 'spSaas']) expect(readme).toContain(`presets.${name}`);
+    expect(Object.keys(presets).sort()).toEqual(['spJwtTest', 'spSaas'].sort());
   });
 });

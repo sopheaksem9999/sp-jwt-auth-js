@@ -19,3 +19,8 @@
 ## Secret scanning
 
 - CI and the release workflow run gitleaks over the full git history and the working tree (`.gitleaks.toml` extends the default rules). A finding blocks the release. Run `gitleaks git . --config .gitleaks.toml --redact` locally before pushing. Never commit real keys; test fixtures use obviously fake values, and an allowlist entry in `.gitleaks.toml` must name the exact fake value.
+
+## Public repo hygiene
+
+- This repository is public. No README, doc, comment, test, example, commit message or release note may name a client project; use neutral example names (`Acme`, `example.com`, `invoices`) and the `sp` prefix for project-style names (for example `presets.spSaas`).
+- `pnpm check` runs `scripts/check-neutral-names.mjs`. The forbidden-name list is **not** in the repository: it comes from the `FORBIDDEN_NAMES` environment variable (a GitHub Actions secret in CI; set it in your shell locally, comma-separated). The script reports `file:line` only, never the name. Without the variable it warns and passes; set `FORBIDDEN_NAMES_REQUIRED=1` to make a missing list fail.

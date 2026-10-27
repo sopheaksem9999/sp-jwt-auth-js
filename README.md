@@ -258,10 +258,10 @@ The package follows these rules so apps do not each get them wrong differently (
 
 ## Presets
 
-`presets.spJwtTest` and `presets.speedxSaas` are frozen `{ endpoints, unwrap }` objects to spread into the options next to your own `baseUrl` and `mode`:
+`presets.spJwtTest` and `presets.spSaas` are frozen `{ endpoints, unwrap }` objects to spread into the options next to your own `baseUrl` and `mode`:
 
 ```ts
-createJwtAuth({ baseUrl, ...presets.speedxSaas, mode: userSession({ storage }) });
+createJwtAuth({ baseUrl, ...presets.spSaas, mode: userSession({ storage }) });
 // override one route:
 createJwtAuth({ baseUrl, ...presets.spJwtTest, endpoints: { ...presets.spJwtTest.endpoints, whoami: '/profile' }, mode });
 ```
@@ -269,7 +269,7 @@ createJwtAuth({ baseUrl, ...presets.spJwtTest, endpoints: { ...presets.spJwtTest
 | Preset | Routes | Response shape |
 |---|---|---|
 | `spJwtTest` | login `/auth/login`, refresh `/auth/refresh`, logout `/auth/logout`, whoami `/me` | `{ user, token: { … } }`, no envelope (`unwrap: 'raw'`) |
-| `speedxSaas` | login, `/auth/login/2fa`, refresh, logout, whoami, `/auth/impersonate_in` (company switch), forgot/reset password, resend verification | `{ success, data }` envelope (`unwrap: 'sp-laravel-api'`) |
+| `spSaas` | login, `/auth/login/2fa`, refresh, logout, whoami, `/auth/impersonate_in` (company switch), forgot/reset password, resend verification | `{ success, data }` envelope (`unwrap: 'sp-laravel-api'`) |
 
 Routes you do not configure make the feature that needs them reject with `SpAuthError('not_configured')`.
 

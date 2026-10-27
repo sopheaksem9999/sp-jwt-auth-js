@@ -81,6 +81,8 @@ jobs:
           REQUIRE_DIST: '1'
       - if: steps.v.outputs.skip == 'false'
         run: pnpm check
+        env:
+          FORBIDDEN_NAMES: ${{ secrets.FORBIDDEN_NAMES }}
       - name: Publish to npm (skipped when this version is already on the registry)
         if: steps.v.outputs.skip == 'false'
         run: |

@@ -11,7 +11,7 @@ function deepFreeze<T extends object>(o: T): Readonly<T> {
  * Spread one into `createJwtAuth` next to your own `baseUrl` and `mode`:
  *
  * ```ts
- * createJwtAuth({ baseUrl, ...presets.speedxSaas, mode: userSession({ storage }) });
+ * createJwtAuth({ baseUrl, ...presets.spSaas, mode: userSession({ storage }) });
  * ```
  *
  * Presets are frozen plain objects; they never include `baseUrl` or `mode`, and
@@ -29,8 +29,8 @@ export const presets = deepFreeze({
     },
     unwrap: 'raw',
   },
-  /** The SpeedX SaaS host: `{ success, data }` envelope, second factor, company switch and account routes. */
-  speedxSaas: {
+  /** A SaaS-style host: `{ success, data }` envelope, second factor, company switch and account routes. */
+  spSaas: {
     endpoints: {
       login: '/auth/login',
       secondFactor: '/auth/login/2fa',

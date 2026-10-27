@@ -145,7 +145,7 @@
     "test:edge-canary": "vitest run --project edge test/edge-canary.test.ts",
     "test:deno": "deno run -A node_modules/vitest/vitest.mjs run --project node",
     "test:bun": "bun --bun node_modules/vitest/vitest.mjs run --project node",
-    "check": "pnpm build && publint && attw --pack . && node scripts/check-dist.mjs && node scripts/check-modules.mjs && node scripts/check-bundle.mjs && node scripts/smoke-imports.mjs",
+    "check": "pnpm build && publint && attw --pack . && node scripts/check-dist.mjs && node scripts/check-modules.mjs && node scripts/check-bundle.mjs && node scripts/smoke-imports.mjs && node scripts/check-neutral-names.mjs",
     "smoke:deno": "deno run --allow-read scripts/deno-smoke.ts",
     "smoke:bun": "bun run scripts/deno-smoke.ts",
     "changeset": "changeset"
