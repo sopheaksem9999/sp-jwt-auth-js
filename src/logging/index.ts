@@ -52,7 +52,8 @@ function build(
     }
   } else if (error instanceof SpAuthError) {
     status = error.status || null;
-    code = clean(error.code, 64);
+    // `code` can be the server's `error` text: only identifier-like values pass.
+    code = /^[a-z0-9_.-]{1,64}$/i.test(error.code) ? error.code : 'unknown';
     requestId = clean(error.requestId, 128);
     errorCode = numericCode(rec(error.body)?.error_code);
   } else {

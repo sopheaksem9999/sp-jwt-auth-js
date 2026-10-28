@@ -208,4 +208,34 @@ describe('request logging', () => {
     await expect(timeout.auth.http({ method: 'GET', endpoint: '/slow' })).rejects.toMatchObject({ code: 'timeout' });
     expect(timeout.entries[0]).toMatchObject({ status: null, code: 'timeout' });
   });
+
+  it('an untrusted error string never reaches the entry code', async () => {
+    for (const hostile of ['Bearer leak token', 'bad\nline\u001b[31mred', 'x'.repeat(200)]) {
+      const { auth, entries } = setup(() => json({ error: hostile, error_description: 'd' }, 400));
+      await auth.login({ email: 'ada@example.com', password: 'p' }).catch(() => {});
+      expect(entries[0]?.code).toBe('unknown');
+      const s = JSON.stringify(entries[0]);
+      for (const part of ['Bearer', 'leak', 'token', 'line', 'red', 'xxxx']) expect(s).not.toContain(part);
+    }
+    const ok = setup(() => json({ error: 'invalid_client' }, 401));
+    await ok.auth.login({ email: 'ada@example.com', password: 'p' }).catch(() => {});
+    expect(ok.entries[0]?.code).toBe('invalid_client');
+  });
+
+  describe('a hand-written logger that throws', () => {
+    const entry = { finish: () => { throw new Error('finish boom'); } };
+    it('in start leaves the request unchanged', async () => {
+      const logger = { start: () => { throw new Error('start boom'); } };
+      const { auth } = setup(() => json({ token: pair }), { logger });
+      await expect(auth.login({ email: 'ada@example.com', password: 'p' })).resolves.toEqual({ status: 'authenticated' });
+    });
+    it('in finish on the success path returns the result', async () => {
+      const { auth } = setup(() => json({ token: pair }), { logger: { start: () => entry } });
+      await expect(auth.login({ email: 'ada@example.com', password: 'p' })).resolves.toEqual({ status: 'authenticated' });
+    });
+    it('in finish on the error path rethrows the original error', async () => {
+      const { auth } = setup(() => json({ message: 'no' }, 422), { logger: { start: () => entry } });
+      await expect(auth.login({ email: 'ada@example.com', password: 'p' })).rejects.toMatchObject({ code: 'invalid_code', status: 422 });
+    });
+  });
 });

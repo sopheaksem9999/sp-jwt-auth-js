@@ -1,5 +1,5 @@
 import { SpAuthError, authErrorFromResponse, sanitizedCause } from './errors';
-import type { AuthRequestLogger } from './log-types';
+import type { AuthLogCall, AuthRequestLogger } from './log-types';
 
 /** Options for one request made through `JwtAuth.http`. */
 export interface HttpRequest {
@@ -108,19 +108,31 @@ function parseBody(text: string): unknown {
 export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<HttpResult<T>> {
   const run = createRun(deps);
   return async <T>(req: HttpRequest): Promise<HttpResult<T>> => {
-    const log =
-      deps.logger !== undefined && deps.logRequests === true
-        ? deps.logger.start({ method: req.method, baseUrl: deps.baseUrl, endpoint: req.endpoint, signal: req.signal })
-        : undefined;
+    let log: AuthLogCall | undefined;
+    if (deps.logger !== undefined && deps.logRequests === true) {
+      try {
+        log = deps.logger.start({ method: req.method, baseUrl: deps.baseUrl, endpoint: req.endpoint, signal: req.signal });
+      } catch {
+        /* a logger never breaks a request */
+      }
+    }
     if (log === undefined) return run<T>(req);
     let result: HttpResult<T>;
     try {
       result = await run<T>(req);
     } catch (error) {
-      log.finish(undefined, error);
+      try {
+        log.finish(undefined, error);
+      } catch {
+        /* the original error is rethrown */
+      }
       throw error;
     }
-    log.finish(result);
+    try {
+      log.finish(result);
+    } catch {
+      /* the original result is returned */
+    }
     return result;
   };
 }
