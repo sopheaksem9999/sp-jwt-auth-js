@@ -420,6 +420,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
       } catch {
         /* disposal never throws */
       }
+      state.clear();
     },
   };
 }

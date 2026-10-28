@@ -71,6 +71,8 @@ export interface StateContainer {
   /** Replaces the state; keeps the old reference (and notifies nobody) when nothing changed. */
   set(next: AuthState): void;
   subscribe(listener: () => void): () => void;
+  /** Drops every listener (used by `dispose()`). */
+  clear(): void;
 }
 
 /** Creates a `StateContainer` starting at `UNKNOWN_STATE`. */
@@ -95,6 +97,9 @@ export function createState(): StateContainer {
       return () => {
         listeners.delete(listener);
       };
+    },
+    clear() {
+      listeners.clear();
     },
   };
 }

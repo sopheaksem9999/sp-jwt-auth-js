@@ -365,6 +365,26 @@ describe('state', () => {
     expect(good).toHaveBeenCalled();
   });
 
+  it('a listener unsubscribing itself during dispatch does not skip the next listener', async () => {
+    const { auth } = setup(() => json(pair));
+    await auth.ready();
+    const second = vi.fn();
+    const unsub = auth.subscribe(() => unsub());
+    auth.subscribe(second);
+    await auth.login({});
+    expect(second).toHaveBeenCalled();
+  });
+
+  it('dispose() clears state listeners', async () => {
+    const { auth } = setup(() => json(pair));
+    await auth.ready();
+    const l = vi.fn();
+    auth.subscribe(l);
+    auth.dispose();
+    await auth.login({});
+    expect(l).not.toHaveBeenCalled();
+  });
+
   it('starts unknown and hydrates from a pre-filled store on ready()', async () => {
     const store = memoryStore();
     await store.set({ accessToken: access, refreshToken: 'r', expiresAt: now() + 900 });
