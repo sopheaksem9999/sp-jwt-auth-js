@@ -26,9 +26,16 @@ function numericCode(v: unknown): number | null {
   return typeof n === 'number' && Number.isSafeInteger(n) ? n : null;
 }
 
+/** Removes trailing `/` with a linear scan (`/\/+$/` is quadratic on a long run of `/` inside the string). */
+function trimTrailingSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s.charCodeAt(end - 1) === 0x2f) end--;
+  return s.slice(0, end);
+}
+
 function pathOf(baseUrl: string, endpoint: string): string {
   const abs = /^https?:\/\//i.test(endpoint);
-  const joined = abs ? endpoint : `${baseUrl.replace(/\/+$/, '')}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+  const joined = abs ? endpoint : `${trimTrailingSlashes(baseUrl)}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
   return clean(joined.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '').split(/[?#]/)[0], 512) ?? '/';
 }
 
