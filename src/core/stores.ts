@@ -130,7 +130,11 @@ function isWebStorage(storage: KeyValueStorage): boolean {
  * reads as logged out, never a mixed session. Neither method throws. `expiresAt` is read as
  * epoch seconds or ISO-8601 and written as epoch seconds. While logged out, the non-token
  * fields (`csrf`, `deviceId`, `lastCompanyId`) still read back so `deviceId` survives a reload.
- * `storageKey` (the access-token key) is set only for Web Storage, for cross-tab naming.
+ * `storageKey` (the access-token key) is set only for Web Storage, for cross-tab naming. Known limit:
+ * the raw token values are not JSON, so without `BroadcastChannel` the `storage`-event fallback cannot
+ * parse them and sync does not happen; with `BroadcastChannel` cross-tab works. A storage read error
+ * makes `get()` return null, so the device-id bootstrap may then write `{ deviceId }` and drop the
+ * other keys (for example a locked keychain whose `getItem` rejects while `removeItem` works).
  */
 export function keyValueTokenStore(storage: KeyValueStorage, keys: Partial<StorageKeys> = {}): TokenStore {
   const k: StorageKeys = { ...DEFAULT_KEYS, ...keys };

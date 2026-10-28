@@ -116,7 +116,8 @@ await auth.ready();
 `keyValueTokenStore(storage, keys?)` needs `getItem`, `setItem` and `removeItem`; pass `keys` to rename the stored keys (defaults start with `sp_`). Notes:
 
 - **Polyfill `crypto.getRandomValues`** before the first call (for example `react-native-get-random-values`). The device id is generated with Web Crypto, and `randomUuid` throws `No Web Crypto random source available` when neither `crypto.randomUUID` nor `crypto.getRandomValues` exists. The OAuth PKCE helpers need the same source.
-- **Cross-tab is off outside a browser.** Without `webStorageStore` (and, for the cookie transport, without a real browser tab) the default is an in-process lock only: no `BroadcastChannel`, no `storage` events. That is what an app wants here.
+- **Cross-tab is off outside a browser.** In React Native the default is an in-process lock only: no `BroadcastChannel`, no `storage` events, which is what an app wants. In a browser, `keyValueTokenStore(localStorage)` does get cross-tab (lock and channel named after the access-token key); only without `BroadcastChannel` is the `storage`-event fallback unable to sync it, because the raw token values are not JSON. Use `webStorageStore` if you need that fallback.
+- **A failing `getItem` is risky.** `get()` returns null on a storage error, and the device-id bootstrap may then write `{ deviceId }`, which removes the other keys. With a locked keychain whose `getItem` rejects while `removeItem` works, that can sign the user out; make the wrapper's `getItem` resolve `null` only for a missing key and not swallow transient errors into a fake miss if you can avoid it.
 - `get()` still returns `csrf`, `deviceId` and `lastCompanyId` while logged out, so the device id survives a restart.
 
 ### Pairing with `@sokpheak/sp-laravel-api`

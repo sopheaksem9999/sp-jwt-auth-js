@@ -43,6 +43,7 @@ const codes = otp(auth, {
 - `OtpVerifyBody.otp_id` became optional (type loosening); omitting it without options is a runtime 422 from the backend.
 - Without `verifyBody`, the kept id is sent as `otp_id` when the caller's body has none (`otp_id` is optional on `OtpVerifyBody`).
 - A throwing callback rejects with `SpAuthError` (`unknown`, module `otp`) and a fixed message; the original error text is not exposed. A throwing `challengeIdFrom` leaves the id as reset by the call.
+- The kept challenge id lives in the `otp()` instance: a `request` on one instance and a `verify` on another loses it (create `otp(auth, …)` once and share it).
 - The Dart second-factor branch of `verify` is not implemented (recorded divergence).
 
 ## Errors (`SpAuthError`, `module: 'otp'`)
