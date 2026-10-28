@@ -17,6 +17,7 @@ export const MODULE_MARKERS_BY_MODULE = {
   sessions: ['sessionRevokeOthers', 'deviceRevoke', 'Response was not a list of sessions'],
   account: ['verifyEmail'],
   social: ['socialRedirect', 'socialCallback', 'Invalid provider'],
+  logging: ['request_failed'],
 };
 
 export const MODULE_MARKERS = Object.values(MODULE_MARKERS_BY_MODULE).flat();

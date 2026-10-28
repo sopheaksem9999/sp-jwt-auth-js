@@ -1,5 +1,6 @@
 import type { Claims } from './claims';
 import type { HttpRequest, HttpResult } from './http';
+import type { AuthRequestLogger } from './log-types';
 import type { AuthState } from './state';
 import type { TokenStore, Tokens } from './stores';
 import type { TokenPairRaw, Unwrap } from './unwrap';
@@ -146,6 +147,13 @@ export interface JwtAuthOptions {
   timeoutMs?: number;
   /** Event hook; exceptions are swallowed. */
   onEvent?: (e: AuthEvent) => void;
+  /**
+   * Request logger from `@sokpheak/sp-jwt-auth/logging` (`createAuthLogger({ sink })`). Entries are produced
+   * only when this is set AND `logRequests` is `true`; entries never hold headers, bodies or query strings.
+   */
+  logger?: AuthRequestLogger;
+  /** Global switch for request logging (needs `logger`); default `false`. */
+  logRequests?: boolean;
 }
 
 /** Shared services handed to a mode when `createJwtAuth` instantiates it. */

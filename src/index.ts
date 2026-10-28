@@ -7,6 +7,7 @@ export { SpAuthError, authErrorFromResponse, isSpAuthError } from './core/errors
 export type { AuthErrorContext, SpAuthErrorCode, SpAuthErrorInit } from './core/errors';
 export { detectChallenge, findTokenPair, unwrap } from './core/unwrap';
 export type { TokenPairRaw, Unwrap } from './core/unwrap';
+export type { AuthLogCall, AuthLogEntry, AuthRequestLogger } from './core/log-types';
 export { decodeClaims } from './core/claims';
 export type { Claims } from './core/claims';
 export { ensureDeviceId, memoryStore, webStorageStore } from './core/stores';

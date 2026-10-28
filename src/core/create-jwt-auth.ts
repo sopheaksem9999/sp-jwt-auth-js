@@ -89,6 +89,8 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
     baseUrl: o.baseUrl,
     fetch: o.fetch,
     timeoutMs: o.timeoutMs,
+    logger: o.logger,
+    logRequests: o.logRequests,
     async deviceHeaders() {
       if (!o.device) return {};
       const h: Record<string, string> = {};

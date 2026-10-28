@@ -4,6 +4,7 @@ import errorsSource from '../../src/core/errors.ts?raw';
 import self from './readme-snippets.test.ts?raw';
 import { createJwtAuth, memoryStore, presets, staticToken, userSession, webStorageStore } from '../../src/index';
 import type { AuthState, JwtAuth } from '../../src/index';
+import { createAuthLogger } from '../../src/logging';
 
 // The README snippets below are copied verbatim (imports aside) between the region markers.
 // The sync test at the bottom fails when README.md and this file drift apart.
@@ -199,6 +200,29 @@ describe('README framework glue', () => {
   });
 });
 
+describe('README request logging', () => {
+  it('logs one fixed-field entry per call and never a secret', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    // #region snippet:logging
+    // import { createJwtAuth, userSession } from '@sokpheak/sp-jwt-auth';
+    // import { createAuthLogger } from '@sokpheak/sp-jwt-auth/logging';
+    const auth = createJwtAuth({
+      baseUrl: 'https://api.example.com',
+      endpoints: { login: '/auth/login' },
+      mode: userSession({ crossTab: false }),
+      logger: createAuthLogger({ sink: (entry) => console.log(entry) }), // the sink is yours: console.log, pino, a metrics call
+      logRequests: true, // the global switch: no entries without it, or without a logger
+    });
+    await auth.login({ email: 'ada@example.com', password: 'a-password' });
+    // { method: 'POST', path: '/auth/login', status: 200, durationMs: 41, requestId: 'req-1', attempt: 1, code: null, errorCode: null }
+    // #endregion
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toMatchObject({ method: 'POST', path: '/auth/login', status: 200, attempt: 1, code: null, errorCode: null });
+    expect(JSON.stringify(log.mock.calls[0]?.[0])).not.toContain('a-password');
+    auth.dispose?.();
+  });
+});
+
 describe('README servers: one instance per request', () => {
   it('seeds a private memoryStore, sends the token, and shares nothing between requests', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -343,7 +367,7 @@ function normalise(code: string): string {
 }
 
 describe('README stays in sync with this file', () => {
-  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest', 'cookie', 'statictoken'])('snippet %s matches', (name) => {
+  it.each(['quickstart', 'vue', 'react', 'angular', 'svelte', 'solid', 'perrequest', 'cookie', 'statictoken', 'logging'])('snippet %s matches', (name) => {
     expect(block(readme, name)).toBe(region(self, name));
   });
 

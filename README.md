@@ -260,6 +260,33 @@ The package follows these rules so apps do not each get them wrong differently (
 
 **On a server pass `crossTab: false`** and a fresh `memoryStore()` per request. Call `auth.dispose()` when a client is discarded: it unsubscribes and closes the channel (idempotent; do not use the client afterwards).
 
+## Request logging
+
+Off by default and shipped as the `/logging` subpath, so it adds nothing to the main entry. Switch it on globally with `logRequests: true` and give a `logger` from `createAuthLogger`; the sink is yours (`console.log`, a pino or winston logger, a metrics call). The package never writes output itself.
+
+<!-- snippet:logging -->
+```ts
+// import { createJwtAuth, userSession } from '@sokpheak/sp-jwt-auth';
+// import { createAuthLogger } from '@sokpheak/sp-jwt-auth/logging';
+const auth = createJwtAuth({
+  baseUrl: 'https://api.example.com',
+  endpoints: { login: '/auth/login' },
+  mode: userSession({ crossTab: false }),
+  logger: createAuthLogger({ sink: (entry) => console.log(entry) }), // the sink is yours: console.log, pino, a metrics call
+  logRequests: true, // the global switch: no entries without it, or without a logger
+});
+await auth.login({ email: 'ada@example.com', password: 'a-password' });
+// { method: 'POST', path: '/auth/login', status: 200, durationMs: 41, requestId: 'req-1', attempt: 1, code: null, errorCode: null }
+```
+
+One entry per HTTP call made through the client: login, refresh, revoke, `whoami`, second factor, OTP, MFA, social and `auth.http`. An `AuthLogEntry` has exactly `method`, `path`, `status` (`null` when no response arrived), `durationMs`, `requestId`, `attempt`, `code` and `errorCode`. **Bodies, headers and query strings are never logged**, and there is no option to turn that on, so a password, a one-time code, a token or a cookie cannot reach the sink.
+
+- `path` is the pathname only (no host, query or fragment) and is logged **verbatim**: a path segment such as a session id (`/auth/sessions/<id>`) appears as is. Keep secrets out of paths.
+- `requestId` comes from the `X-Request-Id` response header, else the body's `meta.request_id`; it is cleaned of control characters and cut to 128 characters.
+- A failed call carries `code` (the `SpAuthError` code; `aborted` when the caller aborted) and, when the response body has a numeric `error_code`, `errorCode`. A `200` response with `success: false` is logged as `code: 'request_failed'` plus its `errorCode`.
+- The sink runs **inline**, before the call settles for the caller: keep it quick. A throw or a rejected promise from the sink is ignored and never changes the call's result.
+- `attempt` is always `1`: the client makes one HTTP attempt per call.
+
 ## Presets
 
 `presets.spJwtTest` and `presets.spSaas` are frozen `{ endpoints, unwrap }` objects to spread into the options next to your own `baseUrl` and `mode`:

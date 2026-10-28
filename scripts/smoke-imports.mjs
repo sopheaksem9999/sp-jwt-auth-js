@@ -41,6 +41,7 @@ const EXPECTED = {
   './sessions': { function: ['sessions'] },
   './account': { function: ['account'] },
   './social': { function: ['social'] },
+  './logging': { function: ['createAuthLogger'] },
 };
 
 const problems = [];

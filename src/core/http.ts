@@ -1,4 +1,5 @@
 import { SpAuthError, authErrorFromResponse, sanitizedCause } from './errors';
+import type { AuthRequestLogger } from './log-types';
 
 /** Options for one request made through `JwtAuth.http`. */
 export interface HttpRequest {
@@ -55,6 +56,9 @@ export interface HttpDeps {
   deviceHeaders(): Promise<Record<string, string>>;
   /** Auth headers for `bearer: true`. */
   authHeaders(): Promise<Record<string, string>>;
+  /** Request logger from `@sokpheak/sp-jwt-auth/logging`; used only when `logRequests === true`. */
+  logger?: AuthRequestLogger;
+  logRequests?: boolean;
 }
 
 /** Package route used by `logout()` when no host `endpoints.logout` is configured. */
@@ -102,6 +106,26 @@ function parseBody(text: string): unknown {
  * rejection's `name`); non-2xx throws via `authErrorFromResponse`.
  */
 export function createHttp(deps: HttpDeps): <T>(req: HttpRequest) => Promise<HttpResult<T>> {
+  const run = createRun(deps);
+  return async <T>(req: HttpRequest): Promise<HttpResult<T>> => {
+    const log =
+      deps.logger !== undefined && deps.logRequests === true
+        ? deps.logger.start({ method: req.method, baseUrl: deps.baseUrl, endpoint: req.endpoint, signal: req.signal })
+        : undefined;
+    if (log === undefined) return run<T>(req);
+    let result: HttpResult<T>;
+    try {
+      result = await run<T>(req);
+    } catch (error) {
+      log.finish(undefined, error);
+      throw error;
+    }
+    log.finish(result);
+    return result;
+  };
+}
+
+function createRun(deps: HttpDeps): <T>(req: HttpRequest) => Promise<HttpResult<T>> {
   return async <T>(req: HttpRequest): Promise<HttpResult<T>> => {
     const doFetch = deps.fetch ?? globalThis.fetch;
     const url = resolveUrl(deps.baseUrl, req.endpoint);

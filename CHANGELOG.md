@@ -1,5 +1,11 @@
 # @sokpheak/sp-jwt-auth
 
+## Unreleased
+
+### Minor Changes
+
+- Optional request logging in the new `@sokpheak/sp-jwt-auth/logging` subpath: `createJwtAuth({ logger: createAuthLogger({ sink }), logRequests: true })` (off by default; entries only when both are set; nothing added to the main entry beyond a small hook). One `AuthLogEntry` (`method`, `path`, `status`, `durationMs`, `requestId`, `attempt`, `code`, `errorCode`) per HTTP call through the client; bodies, headers and query strings are never logged, with no option to enable them. A throwing or rejecting sink never changes a call's result. The main entry exports the `AuthLogEntry` type.
+
 ## 0.2.0
 
 ### Minor Changes

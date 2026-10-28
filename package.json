@@ -42,6 +42,9 @@
       ],
       "social": [
         "./dist/social.d.ts"
+      ],
+      "logging": [
+        "./dist/logging.d.ts"
       ]
     }
   },
@@ -124,6 +127,16 @@
       "require": {
         "types": "./dist/social.d.cts",
         "default": "./dist/social.cjs"
+      }
+    },
+    "./logging": {
+      "import": {
+        "types": "./dist/logging.d.ts",
+        "default": "./dist/logging.js"
+      },
+      "require": {
+        "types": "./dist/logging.d.cts",
+        "default": "./dist/logging.cjs"
       }
     }
   },
