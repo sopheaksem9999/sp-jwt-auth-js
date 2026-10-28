@@ -519,6 +519,59 @@ describe('handleUnauthorized with the failed request', () => {
     expect(auth.getState().status).toBe('authenticated');
     expect(eventTypes(events)).not.toContain('session_ended');
   });
+
+  describe('200 {success:false} 10002 answer', () => {
+    const rejected = (): Response => json({ success: false, error_code: 10002, message: 'Invalid refresh token' });
+
+    it('after a re-login during the request keeps the new session', async () => {
+      const access3 = jwt({ sub: '8', exp: now() + 900 });
+      const gate = deferred<void>();
+      const { auth, store, events } = await seeded({ ...nearExpiry(), deviceId: 'd1' }, async (c) => {
+        if (c.url.endsWith('/auth/token/refresh')) {
+          await gate.promise;
+          return rejected();
+        }
+        return json({ access_token: access3, refresh_token: 'r3', expires_in: 900, token_type: 'Bearer' });
+      });
+      await auth.ready();
+      const p = auth.refresh().catch((e: unknown) => e);
+      await new Promise((r) => setTimeout(r, 0));
+      await auth.login({});
+      gate.resolve();
+      await p;
+      expect((await store.get())?.refreshToken).toBe('r3');
+      expect(auth.getState().status).toBe('authenticated');
+      expect(eventTypes(events)).not.toContain('session_ended');
+    });
+
+    it('after a logout during the request emits no second session_ended', async () => {
+      const gate = deferred<void>();
+      const { auth, events } = await seeded({ ...nearExpiry(), deviceId: 'd1' }, async (c) => {
+        if (c.url.endsWith('/auth/token/refresh')) {
+          await gate.promise;
+          return rejected();
+        }
+        return new Response(null, { status: 204 });
+      });
+      await auth.ready();
+      const p = auth.refresh().catch((e: unknown) => e);
+      await new Promise((r) => setTimeout(r, 0));
+      await auth.logout();
+      const before = events.filter((e) => e.type === 'session_ended').length;
+      gate.resolve();
+      await p;
+      expect(events.filter((e) => e.type === 'session_ended')).toHaveLength(before);
+      expect(auth.getState().status).toBe('anonymous');
+    });
+
+    it('with no interference ends the session with refresh_rejected', async () => {
+      const { auth, events } = await seeded({ ...nearExpiry(), deviceId: 'd1' }, () => rejected());
+      await auth.ready();
+      await auth.refresh().catch(() => undefined);
+      expect(events.find((e) => e.type === 'session_ended')).toMatchObject({ reason: 'refresh_rejected' });
+      expect(auth.getState().status).toBe('anonymous');
+    });
+  });
 });
 
 describe('caller-abort isolation', () => {

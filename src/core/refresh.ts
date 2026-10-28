@@ -235,7 +235,17 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
     } catch (e) {
       fail(e);
       // 10002 / 10010: the server rejected the refresh token, so the session is over; any other 200 failure keeps it.
-      if (isSpAuthError(e) && (e.errorCode === 10002 || e.errorCode === 10010)) await endSession(e.status, e, true);
+      if (isSpAuthError(e) && (e.errorCode === 10002 || e.errorCode === 10010)) {
+        const latest = await safeGet(store);
+        // A logout that has started (or finished) meanwhile: already anonymous, no second session_ended.
+        if (clearCount() !== clearsAtStart || !latest?.refreshToken) throw sessionEndedError(e.status, e);
+        if (latest.refreshToken !== sent && latest.accessToken) {
+          // A re-login or another tab stored a newer pair while this request was in flight: keep it.
+          adopt(latest);
+          return;
+        }
+        await endSession(e.status, e, true);
+      }
       throw e;
     }
 
