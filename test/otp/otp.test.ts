@@ -467,3 +467,34 @@ describe('otp options (host-wrapped OTP)', () => {
     expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ otp_id: 'o-1', code: CODE });
   });
 });
+
+describe('otp host-wrapped responses and reset order', () => {
+  const tokens = { access_token: ACCESS, refresh_token: REFRESH, expires_in: 900 };
+  it('custom route + challengeIdFrom works with a non-OtpSent send response and verify carries the id', async () => {
+    const s = setup((c) => (c.path === '/h/check' ? json(tokens) : json({ data: { challenge: 'c1' } }, 200)));
+    const o = otp(s.auth, {
+      routes: { request: '/h/send', verify: '/h/check' },
+      challengeIdFrom: (r) => (r as { data: { challenge: string } }).data.challenge,
+    });
+    expect(await o.request(req)).toEqual({ otp_id: 'c1', destination_masked: '', expires_in: 0 });
+    await o.verify({ code: CODE });
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ code: CODE, otp_id: 'c1' });
+  });
+  it('no options stays strict', async () => {
+    const s = setup(() => json({ data: { challenge: 'c1' } }, 202));
+    expect((await caught(otp(s.auth).request(req))).code).toBe('unknown');
+  });
+  it('a throwing requestBody still clears the previous id', async () => {
+    let boom = false;
+    const s = setup((c) => (c.path.endsWith('/verify') ? json(tokens) : json({ ...sent, data: { challenge: 'c-1' } }, 202)));
+    const o = otp(s.auth, {
+      challengeIdFrom: (r) => (r as { data: { challenge: string } }).data.challenge,
+      requestBody: (b) => { if (boom) throw new Error('x'); return { ...b }; },
+    });
+    await o.request(req);
+    boom = true;
+    await caught(o.request(req));
+    await o.verify({ code: CODE });
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ code: CODE });
+  });
+});

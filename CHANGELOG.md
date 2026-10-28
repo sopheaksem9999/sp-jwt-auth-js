@@ -6,7 +6,7 @@
 
 - Added `keyValueTokenStore(storage, keys?)`, a `TokenStore` that keeps each field under its own key in any sync or async `KeyValueStorage` (a superset of `localStorage`, so it drops in; also fits a native keychain wrapper). Key names default to `sp_access_token`, `sp_refresh_token`, `sp_access_token_expires_at`, `sp_csrf`, `sp_device_id`, `sp_last_company_id` and can be overridden via `StorageKeys`. The access token is removed first and written last, so an interrupted write reads as logged out.
 
-- `otp(auth, options?)` accepts optional `routes` (full-path overrides), `requestBody`, `verifyBody` and `challengeIdFrom` for an OTP flow wrapped by the host app. The module keeps an internal challenge id: reset by every `request`, kept by `resend` when its response has none, cleared after a successful `verify`, and filled into `verify`'s `otp_id` when absent (`OtpVerifyBody.otp_id` is now optional). Without options nothing changes. The Dart second-factor branch of `verify` is intentionally not added.
+- `otp(auth, options?)` accepts optional `routes` (full-path overrides), `requestBody`, `verifyBody` and `challengeIdFrom` for an OTP flow wrapped by the host app. The module keeps an internal challenge id: reset by every `request`, kept by `resend` when its response has none, cleared after a successful `verify`, and filled into `verify`'s `otp_id` when absent (`OtpVerifyBody.otp_id` is now optional, a type loosening: omitting it without options is a runtime 422). With `challengeIdFrom`, a send response need not look like `OtpSent` and the returned descriptor is best-effort. Without options nothing changes. The Dart second-factor branch of `verify` is intentionally not added.
 
 ### Patch Changes
 

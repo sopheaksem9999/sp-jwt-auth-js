@@ -39,7 +39,7 @@ export interface OtpResendByDestinationBody {
 
 /** Body of `verify`. `destination` and `channel` are optional and sent together to bind the code to its destination. */
 export interface OtpVerifyBody {
-  /** Optional when the module captured a challenge id (see `OtpOptions.challengeIdFrom`). */
+  /** Optional (type loosening); without options and when omitted the backend answers 422. Optional also when the module captured a challenge id (see `OtpOptions.challengeIdFrom`). */
   otp_id?: string;
   code: string;
   destination?: string;
@@ -80,6 +80,9 @@ export interface OtpOptions {
   /** Builds the body sent by `verify`; receives the caller's body and the captured challenge id (or `null`). */
   verifyBody?(b: OtpVerifyBody, challengeId: string | null): Record<string, unknown>;
   /**
+   * When set, a send response need not look like `OtpSent`: the returned descriptor is
+   * best-effort (`otp_id` from the response or the captured id, else `''`;
+   * `destination_masked` `''`; `expires_in` `0`). Without it the response is strict.
    * Reads a challenge id from the raw response of a successful send. Called only
    * after the envelope check passed. `request` resets the kept id first, `resend`
    * keeps it when this returns `null`, and a successful `verify` clears it.
@@ -121,6 +124,24 @@ function toSent(auth: JwtAuth, raw: unknown): OtpSent | null {
   return null;
 }
 
+/** Sent descriptor from whatever fields are present; missing ones become `''` / `0` (`otp_id` falls back to the captured id). */
+function bestEffortSent(auth: JwtAuth, raw: unknown, captured: string | null): OtpSent {
+  let unwrapped: unknown;
+  try {
+    unwrapped = auth.unwrap(raw);
+  } catch {
+    unwrapped = undefined;
+  }
+  const out: OtpSent = { otp_id: captured ?? '', destination_masked: '', expires_in: 0 };
+  for (const v of [isRecord(raw) ? raw.data : undefined, raw, unwrapped]) {
+    if (!isRecord(v)) continue;
+    if (typeof v.otp_id === 'string') out.otp_id = v.otp_id;
+    if (typeof v.destination_masked === 'string') out.destination_masked = v.destination_masked;
+    if (typeof v.expires_in === 'number') out.expires_in = v.expires_in;
+  }
+  return out;
+}
+
 /**
  * First-factor OTP module (backend module `first_factor_otp`, off by default;
  * mirrors `routes/otp.php`). Routes live under `endpoints.otp` (default `/otp`).
@@ -134,8 +155,7 @@ export function otp(auth: JwtAuth, options: OtpOptions = {}): OtpModule {
     override ?? `${auth.endpoint('otp', MODULE).replace(/\/+$/, '')}${suffix}`;
   let challengeId: string | null = null;
 
-  const send = async (suffix: string, override: string | undefined, body: unknown, reset: boolean): Promise<OtpSent> => {
-    if (reset) challengeId = null;
+  const send = async (suffix: string, override: string | undefined, body: unknown): Promise<OtpSent> => {
     const { body: raw } = await auth.http<unknown>({
       method: 'POST',
       endpoint: route(suffix, override),
@@ -145,26 +165,29 @@ export function otp(auth: JwtAuth, options: OtpOptions = {}): OtpModule {
       disabledOn404: true,
     });
     throwIfEnvelopeFailure(raw, MODULE);
-    const sent = toSent(auth, raw);
-    if (!sent) {
-      throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not describe a sent OTP', module: MODULE });
+    const from = options.challengeIdFrom;
+    if (!from) {
+      const strict = toSent(auth, raw);
+      if (!strict) {
+        throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not describe a sent OTP', module: MODULE });
+      }
+      return strict;
     }
-    if (options.challengeIdFrom) {
-      const from = options.challengeIdFrom;
-      const id = callHook('challengeIdFrom', () => from(raw));
-      if (typeof id === 'string' && id !== '') challengeId = id;
-    }
-    return sent;
+    // Host-wrapped flow: the response need not look like an OtpSent.
+    const id = callHook('challengeIdFrom', () => from(raw));
+    if (typeof id === 'string' && id !== '') challengeId = id;
+    return toSent(auth, raw) ?? bestEffortSent(auth, raw, challengeId);
   };
 
   return {
     async request(b) {
+      challengeId = null;
       const build = options.requestBody;
       const body = build ? callHook('requestBody', () => build(b)) : b;
-      return send('/request', options.routes?.request, body, true);
+      return send('/request', options.routes?.request, body);
     },
-    resend: (b) => send('/resend', options.routes?.resend, b, false),
-    resendByDestination: (b) => send('/resend-by-destination', options.routes?.resendByDestination, b, false),
+    resend: (b) => send('/resend', options.routes?.resend, b),
+    resendByDestination: (b) => send('/resend-by-destination', options.routes?.resendByDestination, b),
     async verify(b) {
       const build = options.verifyBody;
       let payload: unknown = b;

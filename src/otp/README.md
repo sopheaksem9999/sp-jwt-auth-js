@@ -39,6 +39,8 @@ const codes = otp(auth, {
 - `routes` overrides `${endpoints.otp}${suffix}` per route; unset routes keep the defaults.
 - `requestBody(b)` builds the `request` body. `verifyBody(b, challengeId)` builds the `verify` body.
 - `challengeIdFrom(response)` reads an id from the raw response of a successful send (never called when the send fails, including a 200 `{ success: false }`). The module keeps it: every `request` resets it, `resend` and `resendByDestination` keep the previous one when the response has none, a successful `verify` clears it.
+- When `challengeIdFrom` is set, a send response need not look like `OtpSent`: the returned descriptor is best-effort (`otp_id` from the response or the captured id, else `''`; `destination_masked` `''`; `expires_in` `0`). Without it the response stays strict.
+- `OtpVerifyBody.otp_id` became optional (type loosening); omitting it without options is a runtime 422 from the backend.
 - Without `verifyBody`, the kept id is sent as `otp_id` when the caller's body has none (`otp_id` is optional on `OtpVerifyBody`).
 - A throwing callback rejects with `SpAuthError` (`unknown`, module `otp`) and a fixed message; the original error text is not exposed. A throwing `challengeIdFrom` leaves the id as reset by the call.
 - The Dart second-factor branch of `verify` is not implemented (recorded divergence).
