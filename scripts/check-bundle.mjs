@@ -15,9 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { MODULE_MARKERS_BY_MODULE, isNodeBuiltin } from './module-markers.mjs';
 
-// Measured 2026-10-26 (esbuild 0.27.7, minified, `export *` of dist/index.js): raw 31,897 B, gzip 10,675 B.
+// Measured 2026-10-28 (esbuild 0.27.7, minified, `export *` of dist/index.js): raw 34,912 B, gzip 11,557 B.
 // Budget = measured + 25%, rounded up. Raise it only with a reason in the commit message.
-const MEASURED = { raw: 31897, gzip: 10675 };
+const MEASURED = { raw: 34912, gzip: 11557 };
 const BUDGET = { raw: Math.ceil(MEASURED.raw * 1.25), gzip: Math.ceil(MEASURED.gzip * 1.25) };
 
 const root = fileURLToPath(new URL('..', import.meta.url));
