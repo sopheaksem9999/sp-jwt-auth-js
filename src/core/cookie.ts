@@ -1,6 +1,7 @@
 import { decodeClaims } from './claims';
 import { resolveSessionCrossTab } from './crosstab';
 import type { BroadcastToken, LockGrant, TabMessage } from './crosstab';
+import { throwIfEnvelopeFailure } from './envelope';
 import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import { PACKAGE_REVOKE_PATH, bearerFrom } from './http';
 import { createRefresher, isSessionEnded, sessionEndedError, waitFor } from './refresh';
@@ -537,6 +538,19 @@ export function cookieSession(options: UserSessionOptions): AuthMode {
             throw err;
           }
           fail(e);
+          throw e;
+        }
+
+        try {
+          throwIfEnvelopeFailure(raw, 'refresh');
+        } catch (e) {
+          fail(e);
+          // 10002 / 10010: the server rejected the refresh token, so the session is over; any other 200 failure keeps it.
+          if (isSpAuthError(e) && (e.errorCode === 10002 || e.errorCode === 10010) && clears === clearsAtStart) {
+            await clear({ broadcast: true, sentCsrf: sent });
+            ctx.emit({ type: 'session_ended', reason: 'refresh_rejected', status: e.status });
+            throw sessionEndedError(e.status, e);
+          }
           throw e;
         }
 

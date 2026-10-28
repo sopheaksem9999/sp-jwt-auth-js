@@ -15,6 +15,7 @@ import type {
   ModeContext,
   ModeRuntime,
 } from './types';
+import { throwIfEnvelopeFailure } from './envelope';
 import { detectChallenge, findTokenPair, unwrap, unwrapOrThrow } from './unwrap';
 import type { TokenPairRaw } from './unwrap';
 
@@ -215,6 +216,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         const result: LoginResult = { status: 'second_factor_required', challenge };
         return result;
       }
+      throwIfEnvelopeFailure(body, 'login');
       await acceptTokens(body, response);
       emit({ type: 'login' });
       return { status: 'authenticated' };
@@ -232,6 +234,7 @@ export function createJwtAuth(options: JwtAuthOptions): JwtAuth {
         credentials: runtime.credentials,
         module: 'secondFactor',
       });
+      throwIfEnvelopeFailure(body, 'secondFactor');
       await acceptTokens(body, response);
       emit({ type: 'login', secondFactor: true });
     },

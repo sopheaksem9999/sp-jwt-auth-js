@@ -2,6 +2,7 @@ import { SpAuthError, isSpAuthError, sanitizedCause } from './errors';
 import type { BroadcastToken, CrossTab } from './crosstab';
 import type { TokenStore, Tokens } from './stores';
 import type { ModeContext } from './types';
+import { throwIfEnvelopeFailure } from './envelope';
 import { findTokenPair, unwrapOrThrow } from './unwrap';
 
 /** Single-flight refresher: concurrent callers share one in-flight refresh. */
@@ -150,11 +151,11 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
   const { ctx, store } = deps;
   const crossTab = deps.crossTab ?? null;
 
-  const endSession = async (status: number, cause?: unknown): Promise<never> => {
+  const endSession = async (status: number, cause?: unknown, rejected = status === 401): Promise<never> => {
     await deps.clearSession();
     ctx.emit({
       type: 'session_ended',
-      reason: status === 401 ? 'refresh_rejected' : 'token_expired',
+      reason: rejected ? 'refresh_rejected' : 'token_expired',
       status,
     });
     throw sessionEndedError(status, cause);
@@ -226,6 +227,15 @@ export function performTokenRefresh(deps: TokenRefreshDeps): () => Promise<void>
         await endSession(401, e);
       }
       fail(e);
+      throw e;
+    }
+
+    try {
+      throwIfEnvelopeFailure(raw, 'refresh');
+    } catch (e) {
+      fail(e);
+      // 10002 / 10010: the server rejected the refresh token, so the session is over; any other 200 failure keeps it.
+      if (isSpAuthError(e) && (e.errorCode === 10002 || e.errorCode === 10010)) await endSession(e.status, e, true);
       throw e;
     }
 

@@ -349,6 +349,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 | `invalid_token` | A token was rejected or malformed. |
 | `invalid_state` | OAuth callback: `state` missing, different, or no pending login (including a replayed callback URL). |
 | `invalid_request` | A malformed request the client refused to send or finish: an OAuth callback without `code` (or with a malformed `error`), a bad session id, device id or social provider value. Also the RFC 6749 code from an OAuth server. |
+| `request_failed` | The server answered HTTP 200 with `{ "success": false }`. `status` is 200; `message`, `errorCode` (numeric `error_code`) and `requestId` come from the body. A failed refresh of this kind keeps the session, except `errorCode` 10002 or 10010, which end it. |
 | `network` | The request failed before a response (offline, DNS, CORS). |
 | `timeout` | The request exceeded `timeoutMs`. |
 | `unknown` | Anything else; read `status` and `body`. |

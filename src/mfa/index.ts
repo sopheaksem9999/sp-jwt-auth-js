@@ -1,3 +1,4 @@
+import { throwIfEnvelopeFailure } from '../core/envelope';
 import { SpAuthError, sanitizedCause } from '../core/errors';
 import type { Challenge, JwtAuth } from '../core/types';
 
@@ -31,6 +32,7 @@ export function mfa(auth: JwtAuth): MfaModule {
         bearer: false,
         module: MODULE,
       });
+      throwIfEnvelopeFailure(raw, MODULE);
       try {
         return auth.unwrap(raw);
       } catch (cause) {

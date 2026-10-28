@@ -1,3 +1,4 @@
+import { throwIfEnvelopeFailure } from '../core/envelope';
 import { SpAuthError } from '../core/errors';
 import type { JwtAuth } from '../core/types';
 
@@ -105,6 +106,7 @@ export function otp(auth: JwtAuth): OtpModule {
       module: MODULE,
       disabledOn404: true,
     });
+    throwIfEnvelopeFailure(raw, MODULE);
     const sent = toSent(auth, raw);
     if (!sent) {
       throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not describe a sent OTP', module: MODULE });
@@ -127,6 +129,7 @@ export function otp(auth: JwtAuth): OtpModule {
         module: MODULE,
         disabledOn404: true,
       });
+      throwIfEnvelopeFailure(body, MODULE);
       await auth.acceptTokens(body, response);
     },
   };

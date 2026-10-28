@@ -14,6 +14,7 @@ export type SpAuthErrorCode =
   | 'invalid_token'
   | 'invalid_state'
   | 'invalid_request'
+  | 'request_failed'
   | 'network'
   | 'timeout'
   | 'unknown'
@@ -36,6 +37,7 @@ export interface SpAuthErrorInit {
   fieldErrors?: Record<string, string[]>;
   requestId?: string | null;
   retryAfter?: number | null;
+  errorCode?: number | null;
   body?: unknown;
   response?: Response | null;
   cause?: unknown;
@@ -49,6 +51,8 @@ export class SpAuthError extends Error {
   fieldErrors: Record<string, string[]>;
   requestId: string | null;
   retryAfter: number | null;
+  /** Numeric `error_code` of an envelope body (numeric strings accepted), else `null`. */
+  readonly errorCode: number | null;
   body: unknown;
   response: Response | null;
   /** Underlying error for transport failures (declared here because the ES2020 lib lacks `Error.cause`). */
@@ -65,6 +69,7 @@ export class SpAuthError extends Error {
     this.fieldErrors = init.fieldErrors ?? {};
     this.requestId = init.requestId ?? null;
     this.retryAfter = init.retryAfter ?? null;
+    this.errorCode = init.errorCode ?? null;
     this.body = init.body ?? null;
     this.response = init.response ?? null;
   }
@@ -95,6 +100,13 @@ export function isSpAuthError(e: unknown): e is SpAuthError {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** @internal A finite integer, or a numeric string of one, else `null`. */
+export function errorCodeFrom(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isInteger(v) ? v : null;
+  if (typeof v === 'string' && /^-?\d+$/.test(v.trim())) return Number(v.trim());
+  return null;
 }
 
 function nonEmpty(v: unknown): string {
@@ -170,6 +182,7 @@ export async function authErrorFromResponse(res: Response, ctx: AuthErrorContext
     fieldErrors,
     requestId,
     retryAfter,
+    errorCode: errorCodeFrom(obj?.error_code),
     body,
     response: res,
   });

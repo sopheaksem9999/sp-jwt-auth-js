@@ -114,3 +114,22 @@ describe('mfa.resend', () => {
     }
   });
 });
+
+describe('mfa on a 200 { success: false }', () => {
+  it('resend rejects with request_failed', async () => {
+    const s = setup(() => ok({ success: false, error_code: 10004, message: 'Too soon', meta: { request_id: 'rq-9' } }));
+    await expect(mfa(s.auth).resend({ kind: '2fa_token', token: 't' })).rejects.toMatchObject({
+      status: 200,
+      code: 'request_failed',
+      message: 'Too soon',
+      errorCode: 10004,
+      requestId: 'rq-9',
+      module: 'mfa',
+    });
+  });
+
+  it('resend still resolves a success:true body', async () => {
+    const s = setup(() => ok({ success: true, message: 'sent' }));
+    expect(await mfa(s.auth).resend({ kind: '2fa_token', token: 't' })).toEqual({ success: true, message: 'sent' });
+  });
+});

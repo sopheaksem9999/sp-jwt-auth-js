@@ -261,3 +261,37 @@ describe('otp verify', () => {
     expect([e2.code, e2.module]).toEqual(['module_disabled', 'otp']);
   });
 });
+
+describe('otp on a 200 { success: false }', () => {
+  const failure = { success: false, error_code: '10004', message: 'Invalid OTP code', meta: { request_id: 'rq-1' } };
+  const bodies = { request: { destination: 'a@example.com', channel: 'email', purpose: 'login' }, resend: { otp_id: 'o-1', destination: 'a@example.com', channel: 'email' }, resendByDestination: { destination: 'a@example.com', channel: 'email', purpose: 'login' }, verify: { otp_id: 'o-1', code: CODE } } as const;
+
+  it.each(Object.keys(bodies) as (keyof typeof bodies)[])('%s throws request_failed and changes nothing', async (name) => {
+    const s = setup(() => json(failure));
+    await s.auth.ready();
+    s.events.length = 0;
+    const before = s.auth.getState();
+    let err: SpAuthError | undefined;
+    try {
+      await (otp(s.auth)[name] as (b: unknown) => Promise<unknown>)(bodies[name]);
+    } catch (e) {
+      err = e as SpAuthError;
+    }
+    expect([err?.status, err?.code, err?.message, err?.errorCode, err?.requestId, err?.module]).toEqual([200, 'request_failed', 'Invalid OTP code', 10004, 'rq-1', 'otp']);
+    expect(await s.store.get()).toBeNull();
+    expect(s.auth.getState()).toEqual(before);
+    expect(s.events).toEqual([]);
+  });
+
+  it('verify leaves an existing session intact', async () => {
+    let fail = false;
+    const s = setup(() => (fail ? json(failure) : json({ access_token: ACCESS, refresh_token: REFRESH, expires_in: 900, token_type: 'Bearer' })));
+    await otp(s.auth).verify(bodies.verify);
+    const tokens = await s.store.get();
+    s.events.length = 0;
+    fail = true;
+    await expect(otp(s.auth).verify(bodies.verify)).rejects.toMatchObject({ code: 'request_failed' });
+    expect(await s.store.get()).toEqual(tokens);
+    expect(s.events).toEqual([]);
+  });
+});
