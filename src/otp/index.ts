@@ -39,7 +39,8 @@ export interface OtpResendByDestinationBody {
 
 /** Body of `verify`. `destination` and `channel` are optional and sent together to bind the code to its destination. */
 export interface OtpVerifyBody {
-  otp_id: string;
+  /** Optional when the module captured a challenge id (see `OtpOptions.challengeIdFrom`). */
+  otp_id?: string;
   code: string;
   destination?: string;
   channel?: OtpChannel;
@@ -62,7 +63,40 @@ export interface OtpModule {
   verify(b: OtpVerifyBody): Promise<void>;
 }
 
+/** Full-path route overrides; each replaces `${endpoints.otp}${suffix}` for that call. */
+export interface OtpRoutes {
+  request?: string;
+  resend?: string;
+  resendByDestination?: string;
+  verify?: string;
+}
+
+/** Optional hooks for an OTP flow wrapped by the host app. With none, the backend routes and bodies are used as-is. */
+export interface OtpOptions {
+  /** Full paths overriding the default routes (per route). */
+  routes?: OtpRoutes;
+  /** Builds the body sent by `request` from the caller's body. */
+  requestBody?(b: OtpRequestBody): Record<string, unknown>;
+  /** Builds the body sent by `verify`; receives the caller's body and the captured challenge id (or `null`). */
+  verifyBody?(b: OtpVerifyBody, challengeId: string | null): Record<string, unknown>;
+  /**
+   * Reads a challenge id from the raw response of a successful send. Called only
+   * after the envelope check passed. `request` resets the kept id first, `resend`
+   * keeps it when this returns `null`, and a successful `verify` clears it.
+   */
+  challengeIdFrom?(response: unknown): string | null;
+}
+
 const MODULE = 'otp';
+
+/** Runs a user callback; a throw becomes a generic error that carries nothing from the original. */
+function callHook<T>(name: string, fn: () => T): T {
+  try {
+    return fn();
+  } catch {
+    throw new SpAuthError({ status: 0, code: 'unknown', message: `OTP ${name} callback threw`, module: MODULE });
+  }
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -93,14 +127,18 @@ function toSent(auth: JwtAuth, raw: unknown): OtpSent | null {
  * A 404 means the host switched the module off: `SpAuthError('module_disabled')`.
  *
  * @param auth The client from `createJwtAuth`.
+ * @param options Optional routes, body builders and challenge id capture for a host-wrapped flow.
  */
-export function otp(auth: JwtAuth): OtpModule {
-  const route = (suffix: string): string => `${auth.endpoint('otp', MODULE).replace(/\/+$/, '')}${suffix}`;
+export function otp(auth: JwtAuth, options: OtpOptions = {}): OtpModule {
+  const route = (suffix: string, override: string | undefined): string =>
+    override ?? `${auth.endpoint('otp', MODULE).replace(/\/+$/, '')}${suffix}`;
+  let challengeId: string | null = null;
 
-  const send = async (suffix: string, body: unknown): Promise<OtpSent> => {
+  const send = async (suffix: string, override: string | undefined, body: unknown, reset: boolean): Promise<OtpSent> => {
+    if (reset) challengeId = null;
     const { body: raw } = await auth.http<unknown>({
       method: 'POST',
-      endpoint: route(suffix),
+      endpoint: route(suffix, override),
       body,
       bearer: false,
       module: MODULE,
@@ -111,18 +149,31 @@ export function otp(auth: JwtAuth): OtpModule {
     if (!sent) {
       throw new SpAuthError({ status: 0, code: 'unknown', message: 'Response did not describe a sent OTP', module: MODULE });
     }
+    if (options.challengeIdFrom) {
+      const from = options.challengeIdFrom;
+      const id = callHook('challengeIdFrom', () => from(raw));
+      if (typeof id === 'string' && id !== '') challengeId = id;
+    }
     return sent;
   };
 
   return {
-    request: (b) => send('/request', b),
-    resend: (b) => send('/resend', b),
-    resendByDestination: (b) => send('/resend-by-destination', b),
+    async request(b) {
+      const build = options.requestBody;
+      const body = build ? callHook('requestBody', () => build(b)) : b;
+      return send('/request', options.routes?.request, body, true);
+    },
+    resend: (b) => send('/resend', options.routes?.resend, b, false),
+    resendByDestination: (b) => send('/resend-by-destination', options.routes?.resendByDestination, b, false),
     async verify(b) {
+      const build = options.verifyBody;
+      let payload: unknown = b;
+      if (build) payload = callHook('verifyBody', () => build(b, challengeId));
+      else if (challengeId !== null && !b.otp_id) payload = { ...b, otp_id: challengeId };
       const { body, response } = await auth.http<unknown>({
         method: 'POST',
-        endpoint: route('/verify'),
-        body: b,
+        endpoint: route('/verify', options.routes?.verify),
+        body: payload,
         bearer: false,
         device: true,
         credentials: auth.credentials,
@@ -131,6 +182,7 @@ export function otp(auth: JwtAuth): OtpModule {
       });
       throwIfEnvelopeFailure(body, MODULE);
       await auth.acceptTokens(body, response);
+      challengeId = null;
     },
   };
 }

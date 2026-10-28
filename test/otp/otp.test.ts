@@ -295,3 +295,175 @@ describe('otp on a 200 { success: false }', () => {
     expect(s.events).toEqual([]);
   });
 });
+
+describe('otp options (host-wrapped OTP)', () => {
+  const tokens = { access_token: ACCESS, refresh_token: REFRESH, expires_in: 900 };
+  const wrapped = (id: string | null) => ({ data: { challenge: id } });
+  const idFrom = (r: unknown): string | null => ((r as { data?: { challenge?: string | null } }).data?.challenge ?? null);
+  const handler = (sendBody: () => unknown) => (c: Call): Response =>
+    c.path.endsWith('/verify') ? json(tokens) : json(sendBody(), 202);
+
+  it('custom routes are called instead of the default suffixes', async () => {
+    const s = setup(() => json({ ...sent, ...tokens }, 202));
+    const o = otp(s.auth, {
+      routes: { request: '/x/send', resend: '/x/again', resendByDestination: '/x/again-dest', verify: '/x/check' },
+    });
+    await o.request(req);
+    await o.resend({ otp_id: 'o-1', destination: req.destination, channel: req.channel });
+    await o.resendByDestination(req);
+    await o.verify({ otp_id: 'o-1', code: CODE });
+    expect(s.calls.map((c) => c.path)).toEqual(['/x/send', '/x/again', '/x/again-dest', '/x/check']);
+  });
+
+  it('a partial routes object leaves the other routes on the defaults', async () => {
+    const s = setup(() => json(sent, 202));
+    await otp(s.auth, { routes: { request: '/x/send' } }).resendByDestination(req);
+    expect(s.calls[0]?.path).toBe('/otp/resend-by-destination');
+  });
+
+  it('challengeIdFrom captures the id from the raw response and verify fills otp_id', async () => {
+    const s = setup(handler(() => ({ ...sent, ...wrapped('c-1') })));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    await o.request(req);
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ code: CODE, otp_id: 'c-1' });
+  });
+
+  it('verify keeps an explicit otp_id', async () => {
+    const s = setup(handler(() => ({ ...sent, ...wrapped('c-1') })));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    await o.request(req);
+    await o.verify({ otp_id: 'mine', code: CODE });
+    expect(JSON.parse(s.calls[1]?.body ?? '').otp_id).toBe('mine');
+  });
+
+  it('every request resets the id; a request without one leaves nothing to fill', async () => {
+    let n = 0;
+    const s = setup(handler(() => ({ ...sent, ...wrapped(n++ === 0 ? 'c-1' : null) })));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    await o.request(req);
+    await o.request(req);
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[2]?.body ?? '')).toEqual({ code: CODE });
+  });
+
+  it('a failed request still resets the id', async () => {
+    let n = 0;
+    const s = setup((c) => (c.path.endsWith('/verify') ? json(tokens) : n++ === 0 ? json({ ...sent, ...wrapped('c-1') }, 202) : json({ message: 'x' }, 502)));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    await o.request(req);
+    await caught(o.request(req));
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[2]?.body ?? '')).toEqual({ code: CODE });
+  });
+
+  it('resend keeps the id when its response has none, and replaces it when it has one', async () => {
+    const ids = ['c-1', null, 'c-2'];
+    const s = setup(handler(() => ({ ...sent, ...wrapped(ids.shift() ?? null) })));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    const r = { otp_id: 'o-1', destination: req.destination, channel: req.channel };
+    await o.request(req);
+    await o.resend(r);
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[2]?.body ?? '').otp_id).toBe('c-1');
+    await o.request(req); // ids exhausted -> null, reset
+    await o.resend(r); // 'c-2'
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[5]?.body ?? '').otp_id).toBe('c-2');
+  });
+
+  it('a successful verify clears the id; a failed one keeps it', async () => {
+    let fail = true;
+    const s = setup((c) => (c.path.endsWith('/verify') ? (fail ? json({ message: 'no' }, 422) : json(tokens)) : json({ ...sent, ...wrapped('c-1') }, 202)));
+    const o = otp(s.auth, { challengeIdFrom: idFrom });
+    await o.request(req);
+    await caught(o.verify({ code: CODE } as never));
+    fail = false;
+    await o.verify({ code: CODE } as never);
+    await o.verify({ code: CODE } as never);
+    const ids = s.calls.slice(1).map((c) => (JSON.parse(c.body ?? '') as { otp_id?: string }).otp_id);
+    expect(ids).toEqual(['c-1', 'c-1', undefined]);
+  });
+
+  it('requestBody and verifyBody receive the caller body (and the challenge id) and their result is sent', async () => {
+    const reqSpy: unknown[] = [];
+    const verSpy: unknown[][] = [];
+    const s = setup(handler(() => ({ ...sent, ...wrapped('c-1') })));
+    const o = otp(s.auth, {
+      challengeIdFrom: idFrom,
+      requestBody: (b) => (reqSpy.push(b), { to: b.destination, kind: b.purpose }),
+      verifyBody: (b, id) => (verSpy.push([b, id]), { id, pin: b.code }),
+    });
+    await o.request(req);
+    const vb = { code: CODE } as never;
+    await o.verify(vb);
+    expect(reqSpy).toEqual([req]);
+    expect(verSpy).toEqual([[vb, 'c-1']]);
+    expect(JSON.parse(s.calls[0]?.body ?? '')).toEqual({ to: req.destination, kind: req.purpose });
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ id: 'c-1', pin: CODE });
+  });
+
+  it('verifyBody gets null when no id was captured', async () => {
+    const seen: unknown[] = [];
+    const s = setup(() => json(tokens));
+    await otp(s.auth, { verifyBody: (b, id) => (seen.push(id), { ...b }) }).verify({ otp_id: 'o-1', code: CODE });
+    expect(seen).toEqual([null]);
+  });
+
+  it('a 200 failure on a send throws and does not call challengeIdFrom', async () => {
+    const spy: unknown[] = [];
+    const s = setup(() => json({ success: false, message: 'nope' }, 200));
+    const o = otp(s.auth, { challengeIdFrom: (r) => (spy.push(r), 'c-1') });
+    await expect(o.request(req)).rejects.toMatchObject({ code: 'request_failed' });
+    expect(spy).toEqual([]);
+  });
+
+  it('a throwing challengeIdFrom rejects with a generic error and keeps the id cleared; no secrets leak', async () => {
+    let n = 0;
+    const s = setup(handler(() => ({ ...sent, ...wrapped('c-1') })));
+    const o = otp(s.auth, {
+      challengeIdFrom: (r) => {
+        if (n++ === 1) throw new Error(`boom ${REFRESH} ${CODE}`);
+        return idFrom(r);
+      },
+    });
+    await o.request(req);
+    const e = await caught(o.request(req));
+    expect(e.code).toBe('unknown');
+    expect(e.module).toBe('otp');
+    expect(JSON.stringify([e.message, e])).not.toContain(REFRESH);
+    expect(JSON.stringify([e.message, e])).not.toContain(CODE);
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[2]?.body ?? '')).toEqual({ code: CODE });
+  });
+
+  it('a throwing requestBody rejects with a generic error before any request', async () => {
+    const s = setup(() => json(sent, 202));
+    const o = otp(s.auth, { requestBody: () => { throw new Error(`secret ${CODE}`); } });
+    const e = await caught(o.request(req));
+    expect([e.code, e.module]).toEqual(['unknown', 'otp']);
+    expect(e.message).not.toContain(CODE);
+    expect(s.calls).toEqual([]);
+  });
+
+  it('a throwing verifyBody rejects generically, sends nothing and keeps the id', async () => {
+    let boom = true;
+    const s = setup(handler(() => ({ ...sent, ...wrapped('c-1') })));
+    const o = otp(s.auth, { challengeIdFrom: idFrom, verifyBody: (b, id) => { if (boom) throw new Error(CODE); return { id, pin: b.code }; } });
+    await o.request(req);
+    const e = await caught(o.verify({ code: CODE } as never));
+    expect(e.message).not.toContain(CODE);
+    expect(s.calls).toHaveLength(1);
+    boom = false;
+    await o.verify({ code: CODE } as never);
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ id: 'c-1', pin: CODE });
+  });
+
+  it('defaults: no options, verify body is sent untouched', async () => {
+    const s = setup(handler(() => sent));
+    const o = otp(s.auth);
+    await o.request(req);
+    await o.verify({ otp_id: 'o-1', code: CODE });
+    expect(JSON.parse(s.calls[1]?.body ?? '')).toEqual({ otp_id: 'o-1', code: CODE });
+  });
+});
