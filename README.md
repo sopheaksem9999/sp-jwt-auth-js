@@ -6,7 +6,7 @@ Typed JavaScript client service for the [`sopheak/sp-jwt-auth`](https://packagis
 > **Client Service Compatibility Notice:**  
 > `@sokpheak/sp-jwt-auth` is a client-side library and **works only with** backends running [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth). It handles token storage, proactive rotation, cross-tab synchronization, and session lifecycles specifically tailored to the package's protocol.
 
-> Status: **0.1, first release.** It ships the core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport, cross-tab refresh), the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`), the presets, and every [module](#modules): `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social`. Caveats: the contract tests against the real backends are written but not yet run (see [Backend compatibility](#backend-compatibility)), and the cookie transport has been verified end to end against a fake backend only.
+> Status: **0.2.0.** It ships the core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport, cross-tab refresh), the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`), the presets, and every [module](#modules): `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social`. Caveats: the contract tests against the real backends are written but not yet run (see [Backend compatibility](#backend-compatibility)), and the cookie transport has been verified end to end against a fake backend only.
 
 ## Install
 
@@ -97,6 +97,41 @@ const state = from((set) => auth.subscribe(() => set(auth.getState())));
 ```
 
 **Angular and `fetch`.** The client calls `fetch`, not Angular's `HttpClient`, so `HttpClient` interceptors do not see these requests. Put logging or loading state in a wrapper passed as the `fetch` option (a function that calls the real `fetch` and adds the concern). Tests mock through the same `fetch` option. Zone.js tracks `fetch`, so change detection and SSR stability work unchanged.
+
+## React Native / Capacitor
+
+There is no `localStorage` in React Native, so keep the tokens with `keyValueTokenStore`, which takes any sync or async key-value storage (AsyncStorage, a secure-store wrapper, a native keychain wrapper). Prefer a secure store: AsyncStorage is unencrypted.
+
+```ts
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createJwtAuth, keyValueTokenStore, userSession } from '@sokpheak/sp-jwt-auth';
+
+const auth = createJwtAuth({
+  baseUrl: 'https://api.example.com',
+  mode: userSession({ storage: keyValueTokenStore(AsyncStorage) }),
+});
+await auth.ready();
+```
+
+`keyValueTokenStore(storage, keys?)` needs `getItem`, `setItem` and `removeItem`; pass `keys` to rename the stored keys (defaults start with `sp_`). Notes:
+
+- **Polyfill `crypto.getRandomValues`** before the first call (for example `react-native-get-random-values`). The device id is generated with Web Crypto, and `randomUuid` throws `No Web Crypto random source available` when neither `crypto.randomUUID` nor `crypto.getRandomValues` exists. The OAuth PKCE helpers need the same source.
+- **Cross-tab is off outside a browser.** Without `webStorageStore` (and, for the cookie transport, without a real browser tab) the default is an in-process lock only: no `BroadcastChannel`, no `storage` events. That is what an app wants here.
+- `get()` still returns `csrf`, `deviceId` and `lastCompanyId` while logged out, so the device id survives a restart.
+
+### Pairing with `@sokpheak/sp-laravel-api`
+
+Pass the `auth` object as the `auth` option of `createApi` and let it own refresh and the one 401 retry. Do not also wrap `fetch` (or add an interceptor) with a second refresh-and-retry layer: both layers would refresh on the same 401, rotating the refresh token twice, and presenting the old one counts as reuse and can revoke the session.
+
+### Dart equivalents
+
+| Dart (`sp_jwt_auth`) | JS (`@sokpheak/sp-jwt-auth`) |
+|---|---|
+| `currentSession` | `getState()` |
+| `isAuthenticated` | `getState().status === 'authenticated'` |
+| `userId` | `getState().claims?.sub` |
+| listener on a token refresh | `onEvent({ type: 'refresh' })` (`subscribe` does not fire when an opaque token leaves the state equal) |
+| `accessTokenSync` | none; use `await getAccessToken()` |
 
 ## Cookie transport (httpOnly refresh cookie)
 
@@ -356,7 +391,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 
 ## Modules
 
-Each module is a function that takes the core auth object (or, for `oauth`, a mode). **The core (session, cookie transport and the server modes), `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social` all ship in 0.1.**
+Each module is a function that takes the core auth object (or, for `oauth`, a mode). **The core (session, cookie transport and the server modes), `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social` all ship in the 0.x line (first in 0.1, current package 0.2.0).**
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|
@@ -382,7 +417,7 @@ const sent = await codes.request({ destination: 'a@example.com', channel: 'email
 await codes.verify({ otp_id: sent.otp_id, code: '123456' }); // stores the pair, state becomes 'authenticated'
 ```
 
-Needs the backend's `first_factor_otp` module (off by default; a 404 is `module_disabled`). Routes are under `endpoints.otp` (default `/otp`). Errors: `invalid_code` (422), `rate_limited` with `retryAfter` (429), `delivery_failed` (502). Details: [`src/otp/README.md`](https://github.com/sopheaksem9999/sp-jwt-auth-js/tree/main/src/otp).
+Needs the backend's `first_factor_otp` module (off by default; a 404 is `module_disabled`). Routes are under `endpoints.otp` (default `/otp`). To drive an OTP flow the host app wraps, pass options: `otp(auth, { routes, requestBody, verifyBody, challengeIdFrom })` overrides the full paths, builds the request and verify bodies and reads the challenge id from the send response (the module then keeps the id and fills `otp_id` in `verify`). Without options nothing changes; there is no second-factor branch in `verify`. Errors: `invalid_code` (422), `rate_limited` with `retryAfter` (429), `delivery_failed` (502). Details: [`src/otp/README.md`](https://github.com/sopheaksem9999/sp-jwt-auth-js/tree/main/src/otp).
 
 ### MFA resend (`mfa`)
 
