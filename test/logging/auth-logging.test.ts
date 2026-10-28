@@ -58,7 +58,8 @@ describe('request logging', () => {
     expect(noLogger.entries).toEqual([]);
   });
 
-  it('login, refresh, revoke, whoami, second factor, OTP, MFA and social calls each produce one entry per attempt', async () => {
+  // Shared name with sp-jwt-auth-dart; the table also covers revoke (logout), second factor and social.
+  it('login, refresh, logout, whoami, OTP and MFA calls each produce one entry per attempt', async () => {
     const responder = (url: URL): Response => {
       if (url.pathname.endsWith('/otp/request') || url.pathname.endsWith('/otp/resend')) {
         return json({ otp_id: 'o1', destination_masked: 'a***@example.com', expires_in: 300 }, 202);
