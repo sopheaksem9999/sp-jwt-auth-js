@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Minor Changes
+
+- Added `keyValueTokenStore(storage, keys?)`, a `TokenStore` that keeps each field under its own key in any sync or async `KeyValueStorage` (a superset of `localStorage`, so it drops in; also fits a native keychain wrapper). Key names default to `sp_access_token`, `sp_refresh_token`, `sp_access_token_expires_at`, `sp_csrf`, `sp_device_id`, `sp_last_company_id` and can be overridden via `StorageKeys`. The access token is removed first and written last, so an interrupted write reads as logged out.
+
 ### Patch Changes
 
 - A HTTP 200 whose body is `{ success: false }` now throws `SpAuthError` with `status` 200, `code` `'request_failed'`, the body `message`, a numeric `errorCode` (from `error_code`) and `requestId` (from `meta.request_id`), for `login`, `verifySecondFactor`, the `/otp` methods, `mfa.resend` and refresh. `SpAuthError` gains `errorCode` (also filled from non-2xx envelope bodies). Callers matching `code === 'unknown'` on login, OTP or refresh failures now see `request_failed`; `mfa.resend` now rejects instead of resolving. A refresh that fails this way keeps the session, except `errorCode` 10002 or 10010, which end it (`refresh_rejected`).

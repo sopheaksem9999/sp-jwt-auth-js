@@ -83,6 +83,113 @@ export function webStorageStore(kind: 'localStorage' | 'sessionStorage', key: st
   return store;
 }
 
+/**
+ * Minimal string key-value storage seam; a superset of `localStorage`, so it drops in.
+ * May be async (e.g. a native secure keychain wrapper). Removing an absent key must not throw.
+ */
+export interface KeyValueStorage {
+  getItem(key: string): string | null | Promise<string | null>;
+  setItem(key: string, value: string): void | Promise<void>;
+  removeItem(key: string): void | Promise<void>;
+}
+
+/** Key names used by `keyValueTokenStore`; override to read a session persisted under other names. */
+export interface StorageKeys {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: string;
+  csrf: string;
+  deviceId: string;
+  lastCompanyId: string;
+}
+
+const DEFAULT_KEYS: StorageKeys = {
+  accessToken: 'sp_access_token',
+  refreshToken: 'sp_refresh_token',
+  expiresAt: 'sp_access_token_expires_at',
+  csrf: 'sp_csrf',
+  deviceId: 'sp_device_id',
+  lastCompanyId: 'sp_last_company_id',
+};
+
+function parseExpiry(raw: string | null): number | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  const n = /^-?\d+(\.\d+)?$/.test(text) ? Number(text) : Date.parse(text) / 1000;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function isWebStorage(storage: KeyValueStorage): boolean {
+  return (['localStorage', 'sessionStorage'] as const).some((k) => resolveStorage(k) === storage);
+}
+
+/**
+ * Store persisting each field under its own key in a `KeyValueStorage` (sync or async).
+ * `get` is null without an access token (a lone refresh token reads as logged out) and on any
+ * storage error; `set` removes the access token first and writes it last, so a crash mid-write
+ * reads as logged out, never a mixed session. Neither method throws. `expiresAt` is read as
+ * epoch seconds or ISO-8601 and written as epoch seconds. While logged out, the non-token
+ * fields (`csrf`, `deviceId`, `lastCompanyId`) still read back so `deviceId` survives a reload.
+ * `storageKey` (the access-token key) is set only for Web Storage, for cross-tab naming.
+ */
+export function keyValueTokenStore(storage: KeyValueStorage, keys: Partial<StorageKeys> = {}): TokenStore {
+  const k: StorageKeys = { ...DEFAULT_KEYS, ...keys };
+  const store: TokenStore = {
+    get: async () => {
+      try {
+        const out: Tokens = {};
+        const read = async (key: string): Promise<string | undefined> => (await storage.getItem(key)) || undefined;
+        const access = await read(k.accessToken);
+        if (access) {
+          out.accessToken = access;
+          const refresh = await read(k.refreshToken);
+          if (refresh) out.refreshToken = refresh;
+          const exp = parseExpiry((await storage.getItem(k.expiresAt)) ?? null);
+          if (exp !== undefined) out.expiresAt = exp;
+        }
+        const csrf = await read(k.csrf);
+        if (csrf) out.csrf = csrf;
+        const deviceId = await read(k.deviceId);
+        if (deviceId) out.deviceId = deviceId;
+        const lastCompanyId = await read(k.lastCompanyId);
+        if (lastCompanyId) out.lastCompanyId = lastCompanyId;
+        return Object.keys(out).length ? out : null;
+      } catch {
+        return null;
+      }
+    },
+    set: async (t) => {
+      if (t === null) {
+        for (const key of Object.values(k)) {
+          try {
+            await storage.removeItem(key);
+          } catch {
+            /* attempt every key */
+          }
+        }
+        return;
+      }
+      try {
+        await storage.removeItem(k.accessToken);
+        const put = async (key: string, v: string | undefined): Promise<void> => {
+          if (v === undefined || v === '') await storage.removeItem(key);
+          else await storage.setItem(key, v);
+        };
+        await put(k.refreshToken, t.refreshToken);
+        await put(k.expiresAt, t.expiresAt === undefined ? undefined : String(t.expiresAt));
+        await put(k.csrf, t.csrf);
+        await put(k.deviceId, t.deviceId);
+        await put(k.lastCompanyId, t.lastCompanyId);
+        if (t.accessToken) await storage.setItem(k.accessToken, t.accessToken);
+      } catch {
+        /* storage failed mid-write: the access token stays removed, so this reads as logged out */
+      }
+    },
+  };
+  if (isWebStorage(storage)) Object.defineProperty(store, 'storageKey', { value: k.accessToken, enumerable: false });
+  return store;
+}
+
 const deviceIds = new WeakMap<TokenStore, Promise<string>>();
 
 async function safeGet(store: TokenStore): Promise<Tokens | null> {
