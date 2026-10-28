@@ -6,7 +6,7 @@ Typed JavaScript client service for the [`sopheak/sp-jwt-auth`](https://packagis
 > **Client Service Compatibility Notice:**  
 > `@sokpheak/sp-jwt-auth` is a client-side library and **works only with** backends running [`sopheak/sp-jwt-auth`](https://packagist.org/packages/sopheak/sp-jwt-auth). It handles token storage, proactive rotation, cross-tab synchronization, and session lifecycles specifically tailored to the package's protocol.
 
-> Status: **0.2.0.** It ships the core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport, cross-tab refresh), the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`), the presets, and every [module](#modules): `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social`. Caveats: the contract tests against the real backends are written but not yet run (see [Backend compatibility](#backend-compatibility)), and the cookie transport has been verified end to end against a fake backend only.
+> Status: **0.3.0.** It ships the core session (`createJwtAuth` with `userSession`, body or [httpOnly-cookie](#cookie-transport-httponly-refresh-cookie) transport, cross-tab refresh), the [server modes](#server-modes) (`staticToken`, `clientCredentials`, `apiKey`), the presets, and every [module](#modules): `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social`. Caveats: the contract tests against the real backends are written but not yet run (see [Backend compatibility](#backend-compatibility)), and the cookie transport has been verified end to end against a fake backend only.
 
 ## Install
 
@@ -392,7 +392,7 @@ Every failed call rejects with one `SpAuthError` (`status`, `code`, `message`, `
 
 ## Modules
 
-Each module is a function that takes the core auth object (or, for `oauth`, a mode). **The core (session, cookie transport and the server modes), `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social` all ship in the 0.x line (first in 0.1, current package 0.2.0).**
+Each module is a function that takes the core auth object (or, for `oauth`, a mode). **The core (session, cookie transport and the server modes), `verify`, `otp`, `mfa`, `oauth`, `sessions`, `account` and `social` all ship in the 0.x line (first in 0.1, current package 0.3.0).**
 
 | Backend module | Import path | Client provides | Status |
 |---|---|---|---|

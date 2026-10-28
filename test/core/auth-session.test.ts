@@ -380,7 +380,7 @@ describe('state', () => {
     await auth.ready();
     const l = vi.fn();
     auth.subscribe(l);
-    auth.dispose();
+    auth.dispose?.();
     await auth.login({});
     expect(l).not.toHaveBeenCalled();
   });

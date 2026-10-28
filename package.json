@@ -1,6 +1,6 @@
 {
   "name": "@sokpheak/sp-jwt-auth",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Typed JavaScript client for the sopheak/sp-jwt-auth Laravel package: token storage, refresh and session helpers.",
   "license": "MIT",
   "author": "Sem Sopheak",

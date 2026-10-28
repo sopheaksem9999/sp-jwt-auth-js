@@ -1,5 +1,25 @@
 # @sokpheak/sp-jwt-auth
 
+## 0.3.0
+
+### Minor Changes
+
+- Added `keyValueTokenStore(storage, keys?)`, a `TokenStore` that keeps each field under its own key in any sync or async `KeyValueStorage` (a superset of `localStorage`, so it drops in; also fits a native keychain wrapper). Key names default to `sp_access_token`, `sp_refresh_token`, `sp_access_token_expires_at`, `sp_csrf`, `sp_device_id`, `sp_last_company_id` and can be overridden via `StorageKeys`. The access token is removed first and written last, so an interrupted write reads as logged out. `get()` returns `csrf`, `deviceId` and `lastCompanyId` while logged out (never tokens), so the device id survives a restart.
+
+- `otp(auth, options?)` accepts optional `routes` (full-path overrides), `requestBody`, `verifyBody` and `challengeIdFrom` for an OTP flow wrapped by the host app. The module keeps an internal challenge id (per `otp()` instance): reset by every `request`, kept by `resend` when its response has none, cleared after a successful `verify`, and filled into `verify`'s `otp_id` when absent (`OtpVerifyBody.otp_id` is now optional, a type loosening: omitting it without options is a runtime 422). With `challengeIdFrom`, a send response need not look like `OtpSent` and the returned descriptor is best-effort. Without options nothing changes. The Dart second-factor branch of `verify` is intentionally not added.
+
+- Optional request logging (D2) in the new `@sokpheak/sp-jwt-auth/logging` subpath: `createJwtAuth({ logger: createAuthLogger({ sink }), logRequests: true })`. Off by default; entries are produced only when both `logger` and `logRequests` are set, and the main entry gains only a small hook and the `AuthLogEntry` type. One `AuthLogEntry` (`method`, `path`, `status`, `durationMs`, `requestId`, `attempt`, `code`, `errorCode`) per HTTP call made through the client (login, refresh, revoke, `whoami`, second factor, OTP, MFA, social, `auth.http`). Bodies, headers and query strings are never logged, with no option to enable them; request ids are cleaned and `code` falls back to `'unknown'` when it is not identifier-like. A sink, or a hand-written logger, that throws or rejects never changes a call's result.
+
+- **Behaviour change.** A HTTP 200 whose body is `{ success: false }` now throws `SpAuthError` with `status` 200, `code` `'request_failed'`, the body `message`, a numeric `errorCode` (from `error_code`) and `requestId` (from `meta.request_id`), for `login`, `verifySecondFactor`, the `/otp` methods, `mfa.resend` and refresh. `SpAuthError` gains `errorCode` (also filled from non-2xx envelope bodies). Callers matching `code === 'unknown'` on login, OTP or refresh failures now see `request_failed` instead; `mfa.resend` now rejects instead of resolving. A refresh that fails this way keeps the session, except `errorCode` 10002 or 10010, which end it (`refresh_rejected`) unless a newer session was stored or the user logged out meanwhile.
+
+### Patch Changes
+
+- `dispose()` now also clears the `subscribe` listeners, so a disposed instance no longer notifies them. A token refresh that leaves the state equal (for example an opaque token) does not notify `subscribe`; use `onEvent({ type: 'refresh' })` for that.
+
+- README: current status (0.2.0), a React Native / Capacitor guide for `keyValueTokenStore`, a pairing warning for `@sokpheak/sp-laravel-api` (no second refresh layer) and a Dart equivalents table. Adds `resolveUrl` unit tests and a README link and anchor test.
+
+- A token pair now needs only a non-empty `access_token`: a missing, non-numeric or negative `expires_in` is treated as no expiry (numeric strings are parsed) instead of failing the login or refresh. The JWT `exp` still takes precedence.
+
 ## 0.2.0
 
 ### Minor Changes
