@@ -7,6 +7,7 @@ export type Unwrap = 'raw' | 'laravel' | 'sp-laravel-api' | ((body: unknown) => 
 export interface TokenPairRaw {
   access_token: string;
   refresh_token?: string;
+  /** Lifetime in seconds. `findTokenPair` normalises a missing or unusable value to 0 (no expiry). */
   expires_in: number;
   token_type: string;
 }
@@ -37,16 +38,20 @@ export function unwrapOrThrow(mode: Unwrap, body: unknown, module?: string): unk
   }
 }
 
+function lifetime(v: unknown): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : Number.NaN;
+  // `0` means "unknown"; missing, non-numeric, NaN, negative and infinite values are not a usable lifetime.
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 function asPair(v: unknown): TokenPairRaw | null {
   if (!isRecord(v) || typeof v.access_token !== 'string' || v.access_token === '') return null;
-  // `0` means "unknown"; NaN, negative and infinite values are not a usable lifetime.
-  if (typeof v.expires_in !== 'number' || !Number.isFinite(v.expires_in) || v.expires_in < 0) return null;
-  return v as unknown as TokenPairRaw;
+  return { ...v, expires_in: lifetime(v.expires_in) } as unknown as TokenPairRaw;
 }
 
 /**
  * Finds a token pair in an unwrapped body: the object itself, then `.token`, then `.data`.
- * A pair needs a non-empty `access_token` and a finite, non-negative numeric `expires_in`.
+ * A pair needs only a non-empty `access_token`; `expires_in` that is missing or unusable becomes 0 (no expiry).
  */
 export function findTokenPair(unwrapped: unknown): TokenPairRaw | null {
   if (!isRecord(unwrapped)) return null;

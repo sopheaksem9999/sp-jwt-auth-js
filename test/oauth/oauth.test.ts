@@ -541,8 +541,8 @@ function dumpError(e: unknown): string {
 describe('invalid token pairs never leak through body or cause', () => {
   const LEAK_RT = 'leak-refresh-token-7f3a9c';
   const LEAK_AT = 'leak-access-token-5d1e2b';
-  // access_token present but `expires_in` is a string: rejected by the pair check, yet it holds live token values.
-  const badPair = (): Response => json({ access_token: LEAK_AT, refresh_token: LEAK_RT, expires_in: 'soon' });
+  // `access_token` is not a string: rejected by the pair check, yet the body holds live token values.
+  const badPair = (): Response => json({ access_token: 12345, refresh_token: LEAK_RT, leaked: LEAK_AT, expires_in: 900 });
 
   it('core acceptTokens (body transport) throws unknown without body or sensitive cause', async () => {
     const s = osetup(() => json({}));

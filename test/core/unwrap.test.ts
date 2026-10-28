@@ -47,3 +47,21 @@ describe('detectChallenge', () => {
     expect(detectChallenge(null)).toBeNull();
   });
 });
+
+describe('findTokenPair leniency (J3)', () => {
+  const at = { access_token: 'a', refresh_token: 'r' };
+  it('parses the sp-laravel-api envelope with an expiry', () => {
+    const body = unwrap('sp-laravel-api', { success: true, data: { ...at, expires_in: 900 } });
+    expect(findTokenPair(body)?.expires_in).toBe(900);
+  });
+  it('parses a flat body', () => expect(findTokenPair({ ...at, expires_in: 900 })?.expires_in).toBe(900));
+  it('a missing expires_in becomes 0', () => expect(findTokenPair(at)?.expires_in).toBe(0));
+  it('parses a numeric string', () => expect(findTokenPair({ ...at, expires_in: '900' })?.expires_in).toBe(900));
+  it.each([-5, 'abc', Number.NaN, Number.POSITIVE_INFINITY, null, '', '-5'])('%s becomes 0', (v) => {
+    expect(findTokenPair({ ...at, expires_in: v })?.expires_in).toBe(0);
+  });
+  it('an empty or missing access_token is not a pair', () => {
+    expect(findTokenPair({ access_token: '', expires_in: 900 })).toBeNull();
+    expect(findTokenPair({ expires_in: 900 })).toBeNull();
+  });
+});

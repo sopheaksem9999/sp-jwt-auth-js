@@ -730,11 +730,11 @@ describe('small correctness', () => {
     expect(await ensureDeviceId(store)).toBe(id);
   });
 
-  it('findTokenPair rejects an empty access token and a NaN or negative expires_in', () => {
+  it('findTokenPair rejects an empty access token but tolerates a bad expires_in', () => {
     expect(findTokenPair({ access_token: '', expires_in: 900, token_type: 'Bearer' })).toBeNull();
-    expect(findTokenPair({ access_token: 'a', expires_in: Number.NaN, token_type: 'Bearer' })).toBeNull();
-    expect(findTokenPair({ access_token: 'a', expires_in: -1, token_type: 'Bearer' })).toBeNull();
-    expect(findTokenPair({ access_token: 'a', expires_in: Number.POSITIVE_INFINITY, token_type: 'Bearer' })).toBeNull();
+    expect(findTokenPair({ access_token: 'a', expires_in: Number.NaN, token_type: 'Bearer' })?.expires_in).toBe(0);
+    expect(findTokenPair({ access_token: 'a', expires_in: -1, token_type: 'Bearer' })?.expires_in).toBe(0);
+    expect(findTokenPair({ access_token: 'a', expires_in: Number.POSITIVE_INFINITY, token_type: 'Bearer' })?.expires_in).toBe(0);
     expect(findTokenPair({ access_token: 'a', expires_in: 0, token_type: 'Bearer' })).not.toBeNull();
     expect(findTokenPair({ token: { access_token: 'a', expires_in: 900 } })).not.toBeNull();
   });
