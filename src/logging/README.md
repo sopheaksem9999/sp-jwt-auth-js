@@ -19,7 +19,7 @@ Entries are produced only when a `logger` is set AND `logRequests` is `true`. On
 **Bodies, headers and query strings are never logged**, and no option turns that on.
 
 - `path` is the pathname only and is logged verbatim (a session id segment appears as is).
-- `requestId` is the `X-Request-Id` header, else the body's `meta.request_id`, cleaned of control characters and cut to 128 characters.
+- `requestId` is the `X-Request-Id` header, else the body's `meta.request_id`, cleaned of control characters (and U+2028/U+2029), cut to 128 characters and trimmed; `null` when nothing is left.
 - `code` is the `SpAuthError` code (`aborted` for a caller abort); `errorCode` is the response body's numeric `error_code`. A 200 `{ success: false }` response is logged as `code: 'request_failed'`; the call itself is unchanged. A code that does not match `/^[a-z0-9_.-]{1,64}$/i` (a server's free-text `error`, for instance) falls back to `'unknown'`, and so does a failure that is not an `SpAuthError`.
 - `attempt` is `1` on every entry: the JS client numbers no retries. A request it repeats (the `switchCompany` retry after a CSRF 403 in cookie mode) is logged as a second entry, also with `attempt: 1`.
 - The sink runs inline: keep it quick. A throw or a rejected promise from it is ignored.

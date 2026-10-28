@@ -14,7 +14,7 @@ export interface AuthLogEntry {
   status: number | null;
   /** Milliseconds from the start of the call to its outcome. */
   durationMs: number;
-  /** `X-Request-Id` response header, else the body's `meta.request_id`; cleaned and cut to 128 characters. */
+  /** `X-Request-Id` response header, else the body's `meta.request_id`; cleaned, cut to 128 characters and trimmed (`null` when empty). */
   requestId: string | null;
   /**
    * 1-based attempt number. The JS client numbers no retries, so it is `1` on every entry: a request it repeats

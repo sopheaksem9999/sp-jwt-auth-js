@@ -190,6 +190,17 @@ describe('request logging', () => {
     expect(out[6]).toBe('tabhereend');
   });
 
+  it('trims the request id after cleaning (same as sp-jwt-auth-dart)', async () => {
+    const ids = ['  rid-7  ', ' \u0000 rid-8 \t', '   ', '\u00a0\u2028 \u00a0'];
+    const out: (string | null)[] = [];
+    for (const id of ids) {
+      const { auth, entries } = setup(() => json({ token: pair, meta: { request_id: id } }));
+      await auth.login({ email: 'ada@example.com', password: 'p' });
+      out.push(entries[0]?.requestId ?? null);
+    }
+    expect(out).toEqual(['rid-7', 'rid-8', null, null]);
+  });
+
   it('an aborted or network-failed call still yields an entry', async () => {
     const net = setup(() => Promise.reject(new TypeError('Failed to fetch https://x?token=leak')));
     await expect(net.auth.login({ email: 'ada@example.com', password: 'p' })).rejects.toMatchObject({ code: 'network' });

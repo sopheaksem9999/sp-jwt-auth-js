@@ -9,10 +9,13 @@ export interface AuthLoggerOptions {
   sink: (entry: AuthLogEntry) => unknown;
 }
 
-/** Strips C0, DEL, C1 and U+2028/U+2029, then cuts to `max` code points (never inside a surrogate pair). */
+/**
+ * Strips C0, DEL, C1 and U+2028/U+2029, cuts to `max` code points (never inside a surrogate pair) and trims; `null`
+ * when nothing is left. Same rule as sp-jwt-auth-dart and sp-laravel-api.
+ */
 function clean(v: unknown, max: number): string | null {
   if (typeof v !== 'string') return null;
-  return Array.from(v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '')).slice(0, max).join('') || null;
+  return Array.from(v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '')).slice(0, max).join('').trim() || null;
 }
 
 type Rec = Record<string, unknown>;
