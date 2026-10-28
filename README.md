@@ -283,9 +283,9 @@ One entry per HTTP call made through the client: login, refresh, revoke, `whoami
 
 - `path` is the pathname only (no host, query or fragment) and is logged **verbatim**: a path segment such as a session id (`/auth/sessions/<id>`) appears as is. Keep secrets out of paths.
 - `requestId` comes from the `X-Request-Id` response header, else the body's `meta.request_id`; it is cleaned of control characters and cut to 128 characters.
-- A failed call carries `code` (the `SpAuthError` code; `aborted` when the caller aborted) and, when the response body has a numeric `error_code`, `errorCode`. A `200` response with `success: false` is logged as `code: 'request_failed'` plus its `errorCode`.
+- A failed call carries `code` (the `SpAuthError` code, or `unknown` when that code is not identifier-like, `/^[a-z0-9_.-]{1,64}$/i`, or the failure is not an `SpAuthError`; `aborted` when the caller aborted) and, when the response body has a numeric `error_code`, `errorCode`. A `200` response with `success: false` is logged as `code: 'request_failed'` plus its `errorCode`.
 - The sink runs **inline**, before the call settles for the caller: keep it quick. A throw or a rejected promise from the sink is ignored and never changes the call's result.
-- `attempt` is always `1`: the client makes one HTTP attempt per call.
+- `attempt` is `1` on every entry: the JS client numbers no retries. A request it repeats (the `switchCompany` retry after a CSRF 403 in cookie mode) is logged as a second entry, also with `attempt: 1`.
 
 ## Presets
 
